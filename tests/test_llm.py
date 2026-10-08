@@ -12,7 +12,9 @@ def test_make_client_uses_deepseek_base_url():
     with patch("src.code_agent.llm.openai.OpenAI") as client_class:
         make_client("test-key")
 
-    client_class.assert_called_once_with(api_key="test-key", base_url=config.BASE_URL)
+    client_class.assert_called_once_with(
+        api_key="test-key", base_url=config.BASE_URL, timeout=120
+    )
 
 
 def test_chat_returns_message_from_mocked_response():
@@ -36,3 +38,29 @@ def test_chat_wraps_openai_api_errors_as_runtime_errors():
 
     with pytest.raises(RuntimeError, match="DeepSeek API request failed"):
         chat(client, [])
+
+
+def test_chat_retries_transient_failures_and_succeeds_on_third_attempt():
+    message = SimpleNamespace(content="recovered")
+    client = Mock()
+    client.chat.completions.create.side_effect = [
+        openai.APIConnectionError(request=Mock()),
+        openai.APIConnectionError(request=Mock()),
+        SimpleNamespace(choices=[SimpleNamespace(message=message)]),
+    ]
+    delays = []
+
+    assert chat(client, [], sleep=delays.append) is message
+    assert client.chat.completions.create.call_count == 3
+    assert delays == [1, 2]
+
+
+def test_chat_does_not_retry_invalid_api_key():
+    client = Mock()
+    client.chat.completions.create.side_effect = openai.AuthenticationError(
+        "bad key", response=Mock(), body=None
+    )
+
+    with pytest.raises(RuntimeError, match="^Invalid API key$"):
+        chat(client, [], sleep=lambda _: pytest.fail("should not retry"))
+    assert client.chat.completions.create.call_count == 1

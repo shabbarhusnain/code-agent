@@ -24,6 +24,9 @@ class Workspace:
 
     def write_file(self, path, content):
         """Write UTF-8 content to a workspace-relative path."""
+        path_text = str(path)
+        if not path_text.strip() or path_text.endswith(("/", "\\")):
+            raise ValueError("File path must name a file.")
         destination = self._path(path)
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(content, encoding="utf-8")
@@ -31,15 +34,26 @@ class Workspace:
 
     def read_file(self, path):
         """Read a UTF-8 file from a workspace-relative path."""
-        return self._path(path).read_text(encoding="utf-8")
+        content = self._path(path).read_text(encoding="utf-8")
+        limit = 20_000
+        if len(content) <= limit:
+            return content
+        remaining = len(content) - limit
+        return content[:limit] + f"... [truncated, {remaining} more characters]"
 
     def list_files(self):
         """Return every workspace file as a sorted, portable relative path."""
-        files = sorted(
-            path.relative_to(self.root).as_posix()
-            for path in self.root.rglob("*")
-            if path.is_file() and path.resolve().is_relative_to(self.root)
-        )
+        files = []
+        for path in self.root.rglob("*"):
+            if not path.is_file() or not path.resolve().is_relative_to(self.root):
+                continue
+            relative = path.relative_to(self.root)
+            if {".pytest_cache", "__pycache__"}.intersection(relative.parts):
+                continue
+            if relative.suffix == ".pyc":
+                continue
+            files.append(relative.as_posix())
+        files.sort()
         return "\n".join(files) if files else "(empty)"
 
     def call(self, name, args):

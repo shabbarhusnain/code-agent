@@ -39,3 +39,15 @@ def test_call_returns_errors_for_unknown_tools_and_bad_arguments(tmp_path):
     assert workspace.call("missing", {}) == "ERROR: Unknown tool: missing"
     assert workspace.call("read_file", {}).startswith("ERROR:")
     assert workspace.call("write_file", {"path": "x.txt"}).startswith("ERROR:")
+
+
+def test_read_file_truncates_large_results_and_write_rejects_directory_paths(tmp_path):
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.write_file("large.txt", "x" * 20_005)
+
+    result = workspace.read_file("large.txt")
+
+    assert result.startswith("x" * 20_000)
+    assert result.endswith("... [truncated, 5 more characters]")
+    assert workspace.call("write_file", {"path": "", "content": "x"}).startswith("ERROR:")
+    assert workspace.call("write_file", {"path": "folder/", "content": "x"}).startswith("ERROR:")
