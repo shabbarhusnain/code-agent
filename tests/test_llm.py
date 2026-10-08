@@ -8,6 +8,11 @@ from src.code_agent import config
 from src.code_agent.llm import chat, make_client
 
 
+def test_config_uses_official_deepseek_v4_pro_model():
+    assert config.BASE_URL == "https://api.deepseek.com"
+    assert config.MODEL == "deepseek-v4-pro"
+
+
 def test_make_client_uses_deepseek_base_url():
     with patch("src.code_agent.llm.openai.OpenAI") as client_class:
         make_client("test-key")

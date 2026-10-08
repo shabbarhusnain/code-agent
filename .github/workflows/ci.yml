@@ -34,7 +34,7 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install -r requirements.txt
       - name: Build executable
-        run: py -m PyInstaller --noconfirm --clean --onefile --windowed --name CodeAgent --paths src --add-data "samples;samples" --collect-submodules openai --collect-data certifi main.py
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name CodeAgent --paths src --add-data "samples;samples" --collect-submodules openai --collect-data certifi main.py
       - name: Smoke test executable
         shell: pwsh
         run: $p = Start-Process dist/CodeAgent.exe -ArgumentList "--selftest" -Wait -PassThru; if ($p.ExitCode -ne 0) { exit 1 }

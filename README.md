@@ -7,6 +7,7 @@ Code Agent is a simplified, desktop code-generation agent inspired by Claude Cod
 - Tkinter desktop interface for selecting the API key, two architecture inputs, and output folder.
 - Markdown and PlantUML preprocessing into structured architecture data.
 - A bounded DeepSeek tool-calling loop with safe workspace-only file tools.
+- The official OpenAI-compatible DeepSeek API endpoint using model `deepseek-v4-pro`.
 - Completion checks, syntax/import self-checking, up to two repair rounds, and generated-test execution when a system Python is available.
 - Cancellation, progress logs, and a redacted `RUN_LOG.txt` in generated output.
 - Windows executable packaging and GitHub Actions CI/release automation.
