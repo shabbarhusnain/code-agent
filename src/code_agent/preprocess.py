@@ -31,58 +31,63 @@ def _parse_table(lines):
 
 
 def parse_documentation(text):
-    """Split documentation into heading sections, text, code, and tables."""
+    """Split documentation into its top-level A-L Markdown sections."""
     sections = []
-    current = {"title": "Preamble", "level": 0, "text": [], "code_blocks": [], "tables": []}
+    current = None
     lines = text.splitlines()
     index = 0
 
     while index < len(lines):
         line = lines[index]
-        fence = _FENCE.match(line)
         heading = _HEADING.match(line)
 
-        if fence:
-            language = fence.group(1)
-            body = []
-            index += 1
-            while index < len(lines) and not lines[index].startswith("```"):
-                body.append(lines[index])
-                index += 1
-            current["code_blocks"].append(
-                {"lang": language, "code": "\n".join(body)}
-            )
-        elif heading:
-            if current["level"] or current["text"] or current["code_blocks"] or current["tables"]:
+        if heading and len(heading.group(1)) == 1:
+            if current is not None:
                 sections.append(current)
-            current = {
-                "title": heading.group(2).strip(),
-                "level": len(heading.group(1)),
-                "text": [],
-                "code_blocks": [],
-                "tables": [],
-            }
-        elif line.strip().startswith("|"):
-            table_lines = []
-            while index < len(lines) and lines[index].strip().startswith("|"):
-                table_lines.append(lines[index])
+            title = heading.group(2).strip()
+            if re.match(r"^[A-L]\.\s+", title):
+                current = {
+                    "title": title,
+                    "level": 1,
+                    "text": [],
+                    "code_blocks": [],
+                    "tables": [],
+                }
+            else:
+                current = None
+        elif current is not None:
+            fence = _FENCE.match(line)
+            if fence:
+                language = fence.group(1)
+                body = []
                 index += 1
-            table = _parse_table(table_lines)
-            if table:
-                current["tables"].append(table)
-            continue
-        elif line.strip():
-            current["text"].append(line.strip())
+                while index < len(lines) and not lines[index].startswith("```"):
+                    body.append(lines[index])
+                    index += 1
+                current["code_blocks"].append(
+                    {"lang": language, "code": "\n".join(body)}
+                )
+            elif line.strip().startswith("|"):
+                table_lines = []
+                while index < len(lines) and lines[index].strip().startswith("|"):
+                    table_lines.append(lines[index])
+                    index += 1
+                table = _parse_table(table_lines)
+                if table:
+                    current["tables"].append(table)
+                continue
+            elif line.strip():
+                current["text"].append(line.strip())
 
         index += 1
 
-    if current["level"] or current["text"] or current["code_blocks"] or current["tables"]:
+    if current is not None:
         sections.append(current)
     return sections
 
 
 def parse_views(text):
-    """Extract PlantUML fenced blocks and simple diagram element names."""
+    """Extract every PlantUML block and its enclosing view name."""
     diagrams = []
     current_view = None
     lines = text.splitlines()
@@ -101,18 +106,14 @@ def parse_views(text):
                 index += 1
 
             source = "\n".join(body)
-            start = re.search(r"@startuml(?:\s+(\S+))?", source)
+            start = re.search(r"@startuml\s+([A-Za-z0-9_]+)", source)
             diagrams.append(
                 {
-                    "name": (
-                        start.group(1)
-                        if start and start.group(1)
-                        else f"diagram{len(diagrams) + 1}"
-                    ),
-                    "view": current_view,
-                    "classes": re.findall(r"^\s*class\s+(\w+)", source, re.M),
+                    "name": start.group(1) if start else f"diagram{len(diagrams) + 1}",
+                    "view": current_view or "",
+                    "classes": re.findall(r"^\s*class\s+([A-Za-z0-9_]+)", source, re.M),
                     "participants": re.findall(
-                        r"^\s*(?:participant|actor|node|artifact)\s+(\w+)",
+                        r"^\s*(?:participant|actor|node|artifact)\s+([A-Za-z0-9_]+)",
                         source,
                         re.M,
                     ),
