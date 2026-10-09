@@ -116,7 +116,7 @@ def test_generated_node_tests_run_through_npm_without_installing(
 
     passed, output = checker.run_generated_tests(tmp_path)
 
-    assert passed is True
+    assert passed is True, output
     assert "2 tests passed" in output
     expected_command, expected_shell = checker._npm_test_command(
         "npm.cmd", windows=os.name == "nt"
@@ -166,12 +166,45 @@ def test_generated_node_tests_skip_when_npm_is_unavailable(tmp_path, monkeypatch
     )
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "app.test.js").write_text("test", encoding="utf-8")
-    monkeypatch.setattr(checker.shutil, "which", lambda _: None)
+    monkeypatch.setattr(checker, "find_npm", lambda: None)
 
     assert checker.run_generated_tests(tmp_path) == (
         None,
         "npm tests skipped: Node.js/npm is not installed",
     )
+
+
+def test_find_npm_uses_standard_windows_install_path(tmp_path, monkeypatch):
+    node_directory = tmp_path / "nodejs"
+    node_directory.mkdir()
+    npm = node_directory / "npm.cmd"
+    npm.write_text("@echo off\n", encoding="utf-8")
+    monkeypatch.setattr(checker.shutil, "which", lambda _: None)
+    monkeypatch.setenv("ProgramFiles", str(tmp_path))
+    monkeypatch.setenv("ProgramFiles(x86)", str(tmp_path / "x86"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+
+    assert checker.find_npm(windows=True) == str(npm)
+
+
+def test_generated_node_tests_run_with_installed_windows_npm(tmp_path):
+    if not checker.find_npm():
+        pytest.skip("Node.js/npm is not installed")
+    (tmp_path / "package.json").write_text(
+        json.dumps({"scripts": {"test": "node --test test/"}}), encoding="utf-8"
+    )
+    (tmp_path / "test").mkdir()
+    (tmp_path / "test" / "game.test.js").write_text(
+        'const test = require("node:test");\n'
+        'const assert = require("node:assert/strict");\n'
+        'test("fraction game logic", () => assert.equal(1 + 1, 2));\n',
+        encoding="utf-8",
+    )
+
+    passed, output = checker.run_generated_tests(tmp_path)
+
+    assert passed is True, output
+    assert "fraction game logic" in output
 
 
 def test_generated_node_tests_report_missing_declared_dependencies(tmp_path, monkeypatch):

@@ -224,3 +224,42 @@ def run_agent(api_key, doc_path, view_path, out_dir, log=print, cancel_event=Non
         "problems": problems,
         "tests_passed": tests_passed,
     }
+
+
+def verify_project(doc_path, view_path, out_dir, log=print):
+    """Run local output checks without creating a DeepSeek client or changing files."""
+    root = Path(out_dir)
+    documentation = Path(doc_path).read_text(encoding="utf-8")
+    views = Path(view_path).read_text(encoding="utf-8")
+    agent_input = preprocess.build_agent_input(documentation, views)
+    require_browser_ui = _requires_browser_ui(agent_input)
+    files = _workspace_files(tools.Workspace(root))
+    missing = _required_missing(files, require_browser_ui)
+    problems = checker.check_project(root)
+    if require_browser_ui:
+        problems.extend(checker.check_browser_ui(root))
+
+    log("Running local verification only; no DeepSeek API request will be made.")
+    if missing:
+        log("Missing required deliverables: " + "; ".join(missing))
+    if problems:
+        log("Self-check found: " + "; ".join(problems))
+    elif not missing:
+        log("Structural and UI checks passed.")
+
+    tests_passed, test_output = checker.run_generated_tests(root)
+    log(test_output)
+    if tests_passed is True:
+        log("Generated tests passed.")
+    elif tests_passed is False:
+        log("Generated tests failed.")
+
+    finished = not missing and not problems and tests_passed is not False
+    return {
+        "verification": True,
+        "files": files,
+        "finished": finished,
+        "missing": missing,
+        "problems": problems,
+        "tests_passed": tests_passed,
+    }

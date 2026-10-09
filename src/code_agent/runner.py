@@ -28,3 +28,20 @@ def start_run(api_key, doc_path, view_path, out_dir, on_log, on_done):
     thread = Thread(target=work, daemon=True)
     thread.start()
     return thread, cancel_event
+
+
+def start_verification(doc_path, view_path, out_dir, on_log, on_done):
+    """Verify an existing generated project locally, without calling DeepSeek."""
+
+    def work():
+        try:
+            result = agent.verify_project(doc_path, view_path, out_dir, log=on_log)
+        except Exception as error:
+            message = str(error) or error.__class__.__name__
+            on_done({"error": message, "verification": True})
+        else:
+            on_done(result)
+
+    thread = Thread(target=work, daemon=True)
+    thread.start()
+    return thread

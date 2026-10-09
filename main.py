@@ -8,7 +8,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from src.code_agent.paths import resource_path
-from src.code_agent.runner import start_run
+from src.code_agent.runner import start_run, start_verification
 
 
 def validate_inputs(api_key, documentation_path, views_path, output_directory):
@@ -152,6 +152,7 @@ def main():
             widget.configure(state=state)
         validate_button.configure(state=state)
         run_button.configure(state=state)
+        verify_button.configure(state=state)
         cancel_button.configure(state="normal" if value else "disabled")
 
     def check_inputs():
@@ -173,6 +174,24 @@ def main():
         if "error" in result:
             status.set("Error")
             append_log(f"Error: {result['error']}")
+            return
+
+        if result.get("verification"):
+            tests_passed = result.get("tests_passed")
+            if result.get("finished") and tests_passed is True:
+                status.set("Verified")
+            elif result.get("finished"):
+                status.set("Checks passed (tests not verified)")
+            else:
+                status.set("Verification incomplete")
+            missing = result.get("missing", [])
+            problems = result.get("problems", [])
+            if missing or problems or tests_passed is False:
+                messagebox.showwarning(
+                    "Output verification",
+                    "The generated project did not pass all local checks. See the log for details.",
+                    parent=root,
+                )
             return
 
         cancelled = result.get("cancelled", False)
@@ -231,6 +250,42 @@ def main():
         running["thread"] = thread
         running["cancel_event"] = cancel_event
 
+    def verify_output():
+        directory = Path(output_directory.get())
+        if not output_directory.get().strip() or not directory.is_dir():
+            status.set("Error")
+            messagebox.showerror(
+                "Output verification",
+                "Select an existing generated-project output directory.",
+                parent=root,
+            )
+            return
+
+        for label, path in (
+            ("Architecture documentation", documentation_path.get()),
+            ("Architecture views", views_path.get()),
+        ):
+            if not path.strip() or not Path(path).is_file():
+                status.set("Error")
+                messagebox.showerror(
+                    "Output verification",
+                    f"Select a valid {label.lower()} file to check requirements.",
+                    parent=root,
+                )
+                return
+
+        status.set("Verifying (no API call)")
+        append_log("Starting local output verification (no DeepSeek credits used)...")
+        set_running(True)
+        running["thread"] = start_verification(
+            documentation_path.get(),
+            views_path.get(),
+            output_directory.get(),
+            lambda line: events.put(("log", line)),
+            lambda result: events.put(("done", result)),
+        )
+        running["cancel_event"] = None
+
     def cancel():
         cancel_event = running["cancel_event"]
         if cancel_event is not None:
@@ -261,10 +316,14 @@ def main():
     run_button.grid(row=6, column=1, sticky="ew", padx=8, pady=(8, 0))
     cancel_button = ttk.Button(content, text="Cancel", command=cancel, state="disabled")
     cancel_button.grid(row=6, column=2, sticky="ew", pady=(8, 0))
+    verify_button = ttk.Button(
+        content, text="Verify output (no API)", command=verify_output
+    )
+    verify_button.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(8, 0))
     open_button = ttk.Button(
         content, text="Open output folder", command=open_output_folder, state="disabled"
     )
-    open_button.grid(row=8, column=0, columnspan=3, sticky="ew")
+    open_button.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(8, 0))
 
     root.protocol("WM_DELETE_WINDOW", close)
     root.after(100, poll_events)

@@ -242,7 +242,7 @@ def run_generated_tests(out_dir, timeout=120):
                 _remove_test_artifacts(root)
 
     if javascript_files and package.get("scripts", {}).get("test"):
-        npm = shutil.which("npm") or shutil.which("npm.cmd")
+        npm = find_npm()
         if not npm:
             results.append((None, "npm tests skipped: Node.js/npm is not installed"))
         else:
@@ -256,7 +256,7 @@ def run_generated_tests(out_dir, timeout=120):
                     timeout=timeout,
                     check=False,
                     shell=use_shell,
-                    env=os.environ.copy(),
+                    env=_npm_environment(npm),
                 )
                 output = (completed.stdout + completed.stderr).strip()
                 missing_dependency = _missing_node_dependency(output, package)
@@ -285,6 +285,31 @@ def run_generated_tests(out_dir, timeout=120):
     return passed, output
 
 
+def find_npm(windows=None):
+    """Find npm on PATH or at common Windows installer locations."""
+    npm = shutil.which("npm") or shutil.which("npm.cmd")
+    if npm:
+        return npm
+    if windows is None:
+        windows = os.name == "nt"
+    if not windows:
+        return None
+
+    roots = [
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "nodejs",
+        Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "nodejs",
+        Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local"))
+        / "Programs"
+        / "nodejs",
+    ]
+    for root in roots:
+        for name in ("npm.cmd", "npm.exe"):
+            candidate = root / name
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+
 def _missing_node_dependency(output, package):
     match = re.search(
         r"Cannot find (?:module|package) ['\"]([^'\"]+)['\"]", output
@@ -308,6 +333,19 @@ def _npm_test_command(npm, windows=None):
     if windows:
         return f'"{npm}" test', True
     return [npm, "test"], False
+
+
+def _npm_environment(npm):
+    """Expose the adjacent node.exe to npm even if PATH predates installation."""
+    environment = os.environ.copy()
+    npm_directory = str(Path(npm).resolve().parent)
+    current_path = environment.get("PATH", "")
+    path_entries = current_path.split(os.pathsep)
+    if not any(Path(entry).resolve() == Path(npm_directory) for entry in path_entries if entry):
+        environment["PATH"] = os.pathsep.join(
+            [npm_directory, current_path] if current_path else [npm_directory]
+        )
+    return environment
 
 
 def _missing_declared_test_dependency(output, requirements):

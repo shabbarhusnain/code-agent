@@ -52,6 +52,47 @@ def test_web_ui_requirement_is_detected_in_architecture_tables():
     )
 
 
+def test_verify_project_runs_local_checks_without_creating_output_files(
+    tmp_path, monkeypatch
+):
+    from src.code_agent import agent
+
+    docs = tmp_path / "Architecture_Documentation.md"
+    views = tmp_path / "Architecture_View.md"
+    docs.write_text(
+        "# A. Overview\nThis is a web-based fraction game.\n",
+        encoding="utf-8",
+    )
+    views.write_text("## Views\n", encoding="utf-8")
+    output = tmp_path / "project"
+    output.mkdir()
+    (output / "README.md").write_text("# Game\n", encoding="utf-8")
+    (output / "package.json").write_text(
+        '{"scripts": {"test": "node --test test/"}}', encoding="utf-8"
+    )
+    (output / "index.html").write_text(
+        '<button onclick="play()">Play</button>', encoding="utf-8"
+    )
+    (output / "test").mkdir()
+    (output / "test" / "game.test.js").write_text("test", encoding="utf-8")
+    monkeypatch.setattr(
+        agent.checker, "run_generated_tests", lambda _: (None, "npm tests skipped")
+    )
+    monkeypatch.setattr(
+        agent.llm, "make_client", lambda *_: pytest.fail("verification must not call DeepSeek")
+    )
+    logs = []
+
+    result = agent.verify_project(docs, views, output, log=logs.append)
+
+    assert result["finished"] is True
+    assert result["tests_passed"] is None
+    assert "index.html" in result["files"]
+    assert "package.json" in result["files"]
+    assert not (output / "RUN_LOG.txt").exists()
+    assert any("no DeepSeek API request" in line for line in logs)
+
+
 @pytest.fixture(autouse=True)
 def skip_generated_pytest(monkeypatch):
     """Keep agent-loop tests independent from a machine's Python installation."""
