@@ -1,4 +1,5 @@
 import time
+from threading import Event
 
 from src.code_agent import runner
 
@@ -66,6 +67,42 @@ def test_runner_cancel_event_stops_long_running_agent(monkeypatch):
     wait_for_done(results)
 
     assert results == [{"cancelled": True}]
+
+
+def test_runner_waits_for_user_action_callback_before_finishing(monkeypatch):
+    def fake_run(*args, on_user_action, **kwargs):
+        response = on_user_action(
+            {"title": "Manual step", "instructions": "Do this, then confirm."}
+        )
+        return {"user_response": response}
+
+    monkeypatch.setattr(runner.agent, "run_agent", fake_run)
+    requested = Event()
+    continue_run = Event()
+    results = []
+
+    def user_action(action):
+        assert action["title"] == "Manual step"
+        requested.set()
+        assert continue_run.wait(timeout=1)
+        return "Completed."
+
+    thread, _ = runner.start_run(
+        "key",
+        "doc",
+        "view",
+        "out",
+        lambda _: None,
+        results.append,
+        on_user_action=user_action,
+    )
+    assert requested.wait(timeout=1)
+    assert results == []
+    continue_run.set()
+    thread.join(timeout=1)
+
+    assert not thread.is_alive()
+    assert results == [{"user_response": "Completed."}]
 
 
 def test_verification_runner_delivers_result_without_api_key(monkeypatch, tmp_path):

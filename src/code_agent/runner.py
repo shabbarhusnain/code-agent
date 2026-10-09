@@ -5,7 +5,7 @@ from threading import Event, Thread
 from . import agent
 
 
-def start_run(api_key, doc_path, view_path, out_dir, on_log, on_done):
+def start_run(api_key, doc_path, view_path, out_dir, on_log, on_done, on_user_action=None):
     """Start an agent run in a daemon thread and return its cancellation handle."""
     cancel_event = Event()
 
@@ -18,6 +18,7 @@ def start_run(api_key, doc_path, view_path, out_dir, on_log, on_done):
                 out_dir,
                 log=on_log,
                 cancel_event=cancel_event,
+                on_user_action=on_user_action,
             )
         except Exception as error:
             message = str(error) or error.__class__.__name__

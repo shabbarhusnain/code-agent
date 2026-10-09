@@ -6,9 +6,9 @@ Code Agent is a simplified, desktop code-generation agent inspired by Claude Cod
 
 - Tkinter desktop interface for selecting the API key, two architecture inputs, and output folder.
 - Markdown and PlantUML preprocessing into structured architecture data.
-- A bounded DeepSeek tool-calling loop with safe workspace-only file tools.
+- A DeepSeek tool-calling loop with safe workspace-only file tools and user-action pause/resume.
 - The official OpenAI-compatible DeepSeek API endpoint using model `deepseek-v4-pro`.
-- Required-deliverable checks, Python syntax/import checks, up to two repair rounds, and generated pytest/npm test execution when a compatible runtime is available.
+- Required-deliverable checks, Python syntax/import checks, repeated repair/recheck until checks pass or the user cancels, and generated pytest/npm test execution.
 - Architecture-aware generation: documented web/graphical applications must include a real UI, not just backend APIs; browser applications must include an HTML entry page.
 - Credit-free **Verify output** action to recheck an existing generated folder after installing its runtime, without making a DeepSeek request.
 - Cancellation, progress logs, and a redacted `RUN_LOG.txt` in generated output.
@@ -16,7 +16,7 @@ Code Agent is a simplified, desktop code-generation agent inspired by Claude Cod
 
 ## Architecture
 
-The preprocessor turns the documentation and PlantUML into structured JSON. The agent supplies that JSON to DeepSeek, which can only write, read, and list files inside the output workspace. The agent is instructed to follow the documented language and implement user-facing flows as working interfaces. The output is checked for a README, dependency manifest, tests, and—when the architecture describes a web app—an interactive HTML UI. Python syntax and likely undeclared imports are checked; Python projects run pytest and Node.js projects run their `npm test` script when those runtimes are available. Failed checks are sent back to the model for up to two repair rounds. **Verify output** reruns local checks on an existing output folder without a DeepSeek request or output-file changes.
+The preprocessor turns the documentation and PlantUML into structured JSON. The agent supplies that JSON to DeepSeek, which can only write, read, and list files inside the output workspace. The agent is instructed to follow the documented language and implement user-facing flows as working interfaces. The output is checked for a README, dependency manifest, tests, and—when the architecture describes a web app—an interactive HTML UI. Python syntax and likely undeclared imports are checked; Python projects run pytest and Node.js projects run their `npm test` script. Failed checks are sent back to the model repeatedly until they pass or the user cancels. If a test runtime or declared dependency is missing, generation pauses and asks the user to install it; pressing **OK - continue** reruns tests and resumes generation. The separate **Verify output** action remains local-only and never calls DeepSeek.
 
 ```mermaid
 flowchart LR
@@ -54,7 +54,7 @@ flowchart LR
 2. Enter a DeepSeek API key.
 3. The bundled `Architecture_Documentation.md` and `Architecture_View.md` samples are selected automatically; use **Browse...** to choose different files.
 4. Select an existing output folder.
-5. Click **Run**. The log tracks progress; **Cancel** requests a safe stop.
+5. Click **Run**. The log tracks progress; **Cancel** requests a safe stop. The agent repeats repair requests until checks pass, so retries can use additional DeepSeek credits. If the agent needs an external/manual step, it shows the task and waits for **OK - continue** before making another model request. The optional response is sent to DeepSeek, so do not enter passwords, API keys, or other secrets there.
 6. To recheck an existing output after installing Node.js or Python, select its folder and click **Verify output (no API)**. This does not use DeepSeek credits or change generated files.
 
 The app asks before writing into a non-empty output folder. When generation ends, use **Open output folder** to inspect the generated project and `RUN_LOG.txt`.
@@ -112,6 +112,6 @@ Download the executable from a successful workflow run’s artifacts, or from th
 
 - A DeepSeek API key with sufficient account balance and internet connection are required for generation. HTTP 402 insufficient-balance errors are reported directly; add funds to the DeepSeek account before retrying.
 - DeepSeek responses can take time; the log displays the current request step and the 120-second request timeout while waiting.
-- Generated tests that require runtimes or declared packages missing from the local machine are reported as skipped, not as model failures. Install the generated project manifest and use **Verify output (no API)** to rerun the tests. On Windows, Code Agent also checks the standard Node.js install location if npm was not added to PATH.
+- Generation is not marked complete unless the generated test suite actually passes. When a runtime or declared dependency is missing, the agent pauses for the user to install it, then reruns the tests after confirmation. **Verify output** reports missing test prerequisites without using DeepSeek credits.
 - Generated output quality depends on the model and the supplied architecture documents.
 - The packaged executable is Windows-only. It is unsigned, so Windows SmartScreen may show a warning.

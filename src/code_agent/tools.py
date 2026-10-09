@@ -78,6 +78,36 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "request_user_action",
+            "description": (
+                "Pause generation and ask the user to perform a necessary manual task "
+                "or provide information. Use only when progress genuinely requires "
+                "user involvement. Give clear actionable instructions; wait for the "
+                "user's confirmation before continuing."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Short title for the task the user must perform.",
+                    },
+                    "instructions": {
+                        "type": "string",
+                        "description": (
+                            "Specific steps for the user and what they should report "
+                            "or confirm before the agent resumes."
+                        ),
+                    },
+                },
+                "required": ["title", "instructions"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "write_file",
             "description": "Write a UTF-8 file inside the workspace.",
             "parameters": {

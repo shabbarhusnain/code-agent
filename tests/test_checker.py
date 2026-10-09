@@ -22,12 +22,29 @@ def test_checker_reports_syntax_error_and_missing_readme(tmp_path):
 
 def test_generated_tests_are_skipped_without_system_python(tmp_path, monkeypatch):
     (tmp_path / "app.py").write_text("pass\n", encoding="utf-8")
-    monkeypatch.setattr(checker.shutil, "which", lambda _: None)
+    monkeypatch.setattr(checker, "find_python", lambda: None)
 
     assert checker.run_generated_tests(tmp_path) == (
         None,
         "pytest skipped: no system Python",
     )
+
+
+def test_find_python_uses_standard_windows_install_path(tmp_path, monkeypatch):
+    python_directory = tmp_path / "Local" / "Programs" / "Python" / "Python314"
+    python_directory.mkdir(parents=True)
+    executable = python_directory / "python.exe"
+    executable.write_text("", encoding="utf-8")
+    program_files = tmp_path / "ProgramFiles"
+    program_files.mkdir()
+    program_files_x86 = tmp_path / "ProgramFilesX86"
+    program_files_x86.mkdir()
+    monkeypatch.setattr(checker.shutil, "which", lambda _: None)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
+    monkeypatch.setenv("ProgramFiles", str(program_files))
+    monkeypatch.setenv("ProgramFiles(x86)", str(program_files_x86))
+
+    assert checker.find_python(windows=True) == str(executable)
 
 
 def test_generated_tests_skip_for_non_python_project(tmp_path):

@@ -208,7 +208,7 @@ def run_generated_tests(out_dir, timeout=120):
 
     results = []
     if python_files:
-        python = shutil.which("python") or shutil.which("py")
+        python = find_python()
         if not python:
             results.append((None, "pytest skipped: no system Python"))
         else:
@@ -307,6 +307,33 @@ def find_npm(windows=None):
             candidate = root / name
             if candidate.is_file():
                 return str(candidate)
+    return None
+
+
+def find_python(windows=None):
+    """Find Python on PATH or in common Windows installer locations."""
+    python = shutil.which("python") or shutil.which("python3") or shutil.which("py")
+    if python:
+        return python
+    if windows is None:
+        windows = os.name == "nt"
+    if not windows:
+        return None
+
+    roots = [
+        Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local"))
+        / "Programs"
+        / "Python",
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")),
+        Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")),
+    ]
+    candidates = []
+    for root in roots:
+        if root.is_dir():
+            candidates.extend(root.glob("Python*/python.exe"))
+    candidates = [path for path in candidates if path.is_file()]
+    if candidates:
+        return str(sorted(candidates, key=lambda path: str(path), reverse=True)[0])
     return None
 
 

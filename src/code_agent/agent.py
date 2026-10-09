@@ -3,13 +3,13 @@
 import json
 from pathlib import Path
 
-from . import checker, config, llm, preprocess, tools
+from . import checker, llm, preprocess, tools
 
 
 SYSTEM_PROMPT = """You are a software engineering agent. You receive structured JSON built
 from architecture documentation and UML views. Implement the documented system as a
-complete, runnable project using ONLY the provided tools: write_file, read_file, and
-list_files.
+complete, runnable project using ONLY the provided tools: write_file, read_file,
+list_files, and request_user_action.
 
 Treat the architecture documents as the source of truth. Follow their specified
 language, runtime, platform, architecture, APIs, data schemas, functional requirements,
@@ -32,6 +32,14 @@ Include all source files, a dependency manifest appropriate to the chosen stack
 commands, and tests covering key user workflows. Implement the requested scope rather
 than adding unrelated infrastructure. Review the written files against the input
 requirements, list them, and fix omissions or inconsistencies before declaring success.
+If progress requires a user to install a prerequisite, supply missing information,
+configure an external service, or perform another task outside this app, call
+request_user_action with clear steps. Generation will pause while the user does it and
+resume only after the user confirms. Do not claim success while required deliverables
+are missing, checks fail, or required tests were skipped; keep fixing and rechecking
+until every required check passes, unless the user cancels or an unrecoverable
+API/system error occurs. Never ask the user to paste passwords, API keys, or other
+secrets into the action response; ask them to configure secrets locally and confirm.
 When the complete project is written, reply with a short summary and make NO further
 tool calls."""
 
@@ -117,8 +125,51 @@ def _tool_result(workspace, tool_call):
     return name, str(arguments.get("path", "")), workspace.call(name, arguments)
 
 
-def run_agent(api_key, doc_path, view_path, out_dir, log=print, cancel_event=None, client=None):
-    """Generate a project from architecture documents through bounded tool calls."""
+def _request_user_action(tool_call, on_user_action):
+    try:
+        arguments = json.loads(tool_call.function.arguments)
+        if not isinstance(arguments, dict):
+            raise ValueError("tool arguments must be a JSON object")
+        title = arguments.get("title")
+        instructions = arguments.get("instructions")
+        if not isinstance(title, str) or not title.strip():
+            raise ValueError("title must be a non-empty string")
+        if not isinstance(instructions, str) or not instructions.strip():
+            raise ValueError("instructions must be a non-empty string")
+    except (json.JSONDecodeError, TypeError, ValueError) as error:
+        return f"ERROR: Invalid user action request: {error}"
+    if on_user_action is None:
+        return "ERROR: User action is unavailable in this run; continue without user input."
+    return str(
+        on_user_action(
+            {"title": title.strip(), "instructions": instructions.strip()}
+        )
+    )
+
+
+def _test_setup_action(test_output):
+    if "pytest skipped:" in test_output or "npm tests skipped:" in test_output:
+        return {
+            "title": "Install test prerequisites",
+            "instructions": (
+                f"{test_output}\n\nInstall the required runtime/dependencies, then "
+                "press OK to rerun the generated project tests. Press Cancel to stop."
+            ),
+        }
+    return None
+
+
+def run_agent(
+    api_key,
+    doc_path,
+    view_path,
+    out_dir,
+    log=print,
+    cancel_event=None,
+    client=None,
+    on_user_action=None,
+):
+    """Generate and repair a project until required local checks pass or cancelled."""
     workspace = tools.Workspace(out_dir)
     log_lines = []
 
@@ -130,8 +181,9 @@ def run_agent(api_key, doc_path, view_path, out_dir, log=print, cancel_event=Non
     problems = []
     tests_passed = None
     require_browser_ui = False
-    steps = repairs = reminders = 0
+    steps = 0
     finished = cancelled = False
+    incomplete_reason = None
     try:
         documentation = Path(doc_path).read_text(encoding="utf-8")
         views = Path(view_path).read_text(encoding="utf-8")
@@ -143,18 +195,22 @@ def run_agent(api_key, doc_path, view_path, out_dir, log=print, cancel_event=Non
             {"role": "user", "content": json.dumps(agent_input)},
         ]
 
-        while steps < config.MAX_STEPS:
+        while True:
             if cancel_event is not None and cancel_event.is_set():
                 cancelled = True
                 safe_log("Agent cancelled.")
                 break
 
             safe_log(
-                f"Waiting for DeepSeek response (step {steps + 1}/{config.MAX_STEPS}; "
+                f"Waiting for DeepSeek response (step {steps + 1}; "
                 f"request timeout {llm.REQUEST_TIMEOUT_SECONDS}s)..."
             )
             message = llm.chat(client, messages, tools=tools.TOOL_SCHEMAS)
             steps += 1
+            if cancel_event is not None and cancel_event.is_set():
+                cancelled = True
+                safe_log("Agent cancelled.")
+                break
             messages.append(_message_for_history(message))
             content = getattr(message, "content", None)
             if content:
@@ -163,11 +219,23 @@ def run_agent(api_key, doc_path, view_path, out_dir, log=print, cancel_event=Non
             tool_calls = getattr(message, "tool_calls", None) or []
             if tool_calls:
                 for tool_call in tool_calls:
-                    name, path, result = _tool_result(workspace, tool_call)
-                    safe_log(f"{name}({path})")
+                    if cancel_event is not None and cancel_event.is_set():
+                        cancelled = True
+                        safe_log("Agent cancelled.")
+                        break
+                    name = tool_call.function.name
+                    if name == "request_user_action":
+                        safe_log("Waiting for user to complete a requested task...")
+                        result = _request_user_action(tool_call, on_user_action)
+                        safe_log("User task response received.")
+                    else:
+                        name, path, result = _tool_result(workspace, tool_call)
+                        safe_log(f"{name}({path})")
                     messages.append(
                         {"role": "tool", "tool_call_id": tool_call.id, "content": result}
                     )
+                if cancelled:
+                    break
                 continue
 
             files = _workspace_files(workspace)
@@ -184,33 +252,65 @@ def run_agent(api_key, doc_path, view_path, out_dir, log=print, cancel_event=Non
             tests_passed, test_output = checker.run_generated_tests(workspace.root)
             if tests_passed is None:
                 safe_log(test_output)
+                action = _test_setup_action(test_output)
+                if action and not missing and not problems:
+                    if on_user_action is None:
+                        incomplete_reason = test_output
+                        safe_log("Generation is incomplete because tests could not run.")
+                        break
+                    safe_log("Waiting for user to install test prerequisites...")
+                    response = on_user_action(action)
+                    if cancel_event is not None and cancel_event.is_set():
+                        cancelled = True
+                        safe_log("Agent cancelled.")
+                        break
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "The user completed the requested test setup task and "
+                                f"confirmed: {response}. Rerun all project tests now."
+                            ),
+                        }
+                    )
+                    continue
             elif tests_passed:
                 safe_log("Generated tests passed.")
             else:
                 safe_log("Generated tests failed.")
 
             if missing:
-                if reminders < 2:
-                    reminders += 1
-                    messages.append(
-                        {"role": "user", "content": "The workspace is missing: " + ", ".join(missing)}
-                    )
-                    continue
-                safe_log("Generation is incomplete because required deliverables are still missing.")
-                break
-            if (problems or tests_passed is False) and repairs < 2:
-                repairs += 1
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Required deliverables are missing: "
+                            + "; ".join(missing)
+                            + ". Implement them and continue until every required "
+                            "validation check passes."
+                        ),
+                    }
+                )
+                continue
+            if problems or tests_passed is False:
                 messages.append(
                     {"role": "user", "content": _repair_message(problems, tests_passed, test_output)}
                 )
                 continue
-            if problems or tests_passed is False:
-                safe_log("Generation is incomplete because validation checks are still failing.")
-                break
+            if tests_passed is None:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Required project tests were not verified:\n"
+                            f"{test_output}\n\nAdd a supported, runnable test suite and "
+                            "continue until it passes."
+                        ),
+                    }
+                )
+                continue
             finished = True
             break
-        else:
-            safe_log(f"Agent reached the maximum of {config.MAX_STEPS} steps.")
     finally:
         (workspace.root / "RUN_LOG.txt").write_text("\n".join(log_lines) + "\n", encoding="utf-8")
 
@@ -223,6 +323,7 @@ def run_agent(api_key, doc_path, view_path, out_dir, log=print, cancel_event=Non
         "missing": _required_missing(files, require_browser_ui),
         "problems": problems,
         "tests_passed": tests_passed,
+        "incomplete_reason": incomplete_reason,
     }
 
 
@@ -254,7 +355,7 @@ def verify_project(doc_path, view_path, out_dir, log=print):
     elif tests_passed is False:
         log("Generated tests failed.")
 
-    finished = not missing and not problems and tests_passed is not False
+    finished = not missing and not problems and tests_passed is True
     return {
         "verification": True,
         "files": files,

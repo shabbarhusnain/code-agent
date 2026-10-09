@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from src.code_agent.tools import Workspace
+from src.code_agent.tools import TOOL_SCHEMAS, Workspace
 
 
 def test_write_then_read_creates_nested_directories(tmp_path):
@@ -51,3 +51,14 @@ def test_read_file_truncates_large_results_and_write_rejects_directory_paths(tmp
     assert result.endswith("... [truncated, 5 more characters]")
     assert workspace.call("write_file", {"path": "", "content": "x"}).startswith("ERROR:")
     assert workspace.call("write_file", {"path": "folder/", "content": "x"}).startswith("ERROR:")
+
+
+def test_user_action_tool_requires_actionable_title_and_instructions():
+    action_tool = next(
+        tool["function"]
+        for tool in TOOL_SCHEMAS
+        if tool["function"]["name"] == "request_user_action"
+    )
+
+    assert action_tool["parameters"]["required"] == ["title", "instructions"]
+    assert "Pause generation" in action_tool["description"]

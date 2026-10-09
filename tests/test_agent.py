@@ -1,11 +1,12 @@
 from pathlib import Path
-from threading import Event
+from threading import Event, Thread
+import time
 from types import SimpleNamespace
 
 import pytest
 
 from main import default_sample_paths, validate_inputs
-from src.code_agent import config, preprocess
+from src.code_agent import preprocess
 from src.code_agent.agent import (
     SYSTEM_PROMPT,
     _required_missing,
@@ -29,6 +30,8 @@ def test_generation_prompt_requires_architecture_faithful_user_interfaces():
     assert "A backend, API docs, or" in SYSTEM_PROMPT
     assert "static mockup alone is not a complete UI" in SYSTEM_PROMPT
     assert "complete described play loop" in SYSTEM_PROMPT
+    assert "request_user_action" in SYSTEM_PROMPT
+    assert "resume only after the user confirms" in SYSTEM_PROMPT
 
 
 def test_sample_architecture_requires_a_browser_ui():
@@ -85,7 +88,7 @@ def test_verify_project_runs_local_checks_without_creating_output_files(
 
     result = agent.verify_project(docs, views, output, log=logs.append)
 
-    assert result["finished"] is True
+    assert result["finished"] is False
     assert result["tests_passed"] is None
     assert "index.html" in result["files"]
     assert "package.json" in result["files"]
@@ -94,9 +97,12 @@ def test_verify_project_runs_local_checks_without_creating_output_files(
 
 
 @pytest.fixture(autouse=True)
-def skip_generated_pytest(monkeypatch):
-    """Keep agent-loop tests independent from a machine's Python installation."""
-    monkeypatch.setattr("src.code_agent.checker.shutil.which", lambda _: None)
+def mock_generated_test_success(monkeypatch):
+    """Keep agent-loop tests independent from installed project runtimes."""
+    monkeypatch.setattr(
+        "src.code_agent.checker.run_generated_tests",
+        lambda _: (True, "mock project tests passed"),
+    )
 
 
 class FakeMessage:
@@ -131,14 +137,14 @@ class FakeClient:
         return SimpleNamespace(choices=[SimpleNamespace(message=next(self.responses))])
 
 
-def run_with_samples(tmp_path, responses, **kwargs):
+def run_with_samples(tmp_path, responses, client=None, **kwargs):
     return run_agent(
         "not-used",
         SAMPLES / "Architecture_Documentation.md",
         SAMPLES / "Architecture_View.md",
         tmp_path / "project",
         log=lambda _: None,
-        client=FakeClient(responses),
+        client=client or FakeClient(responses),
         **kwargs,
     )
 
@@ -222,8 +228,15 @@ def test_agent_returns_tool_error_for_invalid_json_and_continues(tmp_path):
         [
             FakeMessage(tool_calls=[tool_call("bad", "write_file", "not-json")]),
             FakeMessage(content="Done."),
-            FakeMessage(content="Still done."),
-            FakeMessage(content="Finally done."),
+            FakeMessage(
+                tool_calls=[
+                    tool_call("1", "write_file", '{"path": "README.md", "content": "# Demo"}'),
+                    tool_call("2", "write_file", '{"path": "requirements.txt", "content": "pytest"}'),
+                    tool_call("3", "write_file", '{"path": "tests/test_x.py", "content": "def test_ok():\\n    assert True"}'),
+                    tool_call("4", "write_file", '{"path": "index.html", "content": "<button onclick=play()>Play</button>"}'),
+                ]
+            ),
+            FakeMessage(content="Complete."),
         ]
     )
     logs = []
@@ -234,12 +247,12 @@ def test_agent_returns_tool_error_for_invalid_json_and_continues(tmp_path):
 
     tool_messages = [message for message in client.requests[1]["messages"] if message["role"] == "tool"]
     assert tool_messages[0]["content"].startswith("ERROR: Invalid tool arguments:")
-    assert result["finished"] is False
-    assert "a browser UI (.html file) required by the architecture" in result["missing"]
-    assert "Generation is incomplete because required deliverables are still missing." in logs
+    assert result["finished"] is True
+    assert result["missing"] == []
+    assert any("Project is missing required deliverables:" in line for line in logs)
 
 
-def test_agent_reminds_model_once_then_accepts_missing_file_fix(tmp_path):
+def test_agent_keeps_repairing_missing_files_until_fixed(tmp_path):
     client = FakeClient(
         [
             FakeMessage(tool_calls=[tool_call("1", "write_file", '{"path": "requirements.txt", "content": ""}')]),
@@ -259,7 +272,7 @@ def test_agent_reminds_model_once_then_accepts_missing_file_fix(tmp_path):
 
     reminders = [
         message for request in client.requests for message in request["messages"]
-        if message["role"] == "user" and message["content"].startswith("The workspace is missing:")
+        if message["role"] == "user" and message["content"].startswith("Required deliverables are missing:")
     ]
     assert len({id(message) for message in reminders}) == 1
     assert result["finished"] is True
@@ -277,27 +290,148 @@ def test_agent_stops_cleanly_when_cancelled(tmp_path):
     assert result["steps"] == 0
 
 
-def test_agent_stops_at_configured_step_limit(tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "MAX_STEPS", 3)
+def test_user_action_tool_pauses_model_requests_until_user_confirms(tmp_path):
+    action_requested = Event()
+    allow_resume = Event()
     client = FakeClient(
-        [FakeMessage(tool_calls=[tool_call(str(step), "list_files", "{}")]) for step in range(3)]
+        [
+            FakeMessage(
+                tool_calls=[
+                    tool_call(
+                        "action-1",
+                        "request_user_action",
+                        '{"title": "Install Node.js", "instructions": "Install Node and press OK."}',
+                    )
+                ]
+            ),
+            FakeMessage(
+                tool_calls=[
+                    tool_call("1", "write_file", '{"path": "README.md", "content": "# Demo"}'),
+                    tool_call("2", "write_file", '{"path": "package.json", "content": "{\\"scripts\\":{\\"test\\":\\"node --test\\"}}"}'),
+                    tool_call("3", "write_file", '{"path": "tests/game.test.js", "content": "test"}'),
+                    tool_call("4", "write_file", '{"path": "index.html", "content": "<button onclick=play()>Play</button>"}'),
+                ]
+            ),
+            FakeMessage(content="Complete."),
+        ]
     )
-    logs = []
-    result = run_agent(
-        "not-used", SAMPLES / "Architecture_Documentation.md", SAMPLES / "Architecture_View.md",
-        tmp_path / "project", log=logs.append, client=client,
+    results = []
+    actions = []
+
+    def wait_for_user(action):
+        actions.append(action)
+        action_requested.set()
+        assert allow_resume.wait(timeout=1)
+        return "Node.js installed."
+
+    thread = Thread(
+        target=lambda: results.append(
+            run_with_samples(
+                tmp_path,
+                [],
+                client=client,
+                on_user_action=wait_for_user,
+            )
+        ),
+        daemon=True,
+    )
+    thread.start()
+    assert action_requested.wait(timeout=1)
+    time.sleep(0.03)
+    assert len(client.requests) == 1
+    allow_resume.set()
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert actions == [
+        {"title": "Install Node.js", "instructions": "Install Node and press OK."}
+    ]
+    assert results[0]["finished"] is True
+    tool_results = [
+        message
+        for message in client.requests[1]["messages"]
+        if message["role"] == "tool"
+    ]
+    assert tool_results[0]["content"] == "Node.js installed."
+
+
+def test_cancelling_during_user_action_does_not_send_another_model_request(tmp_path):
+    cancel_event = Event()
+    client = FakeClient(
+        [
+            FakeMessage(
+                tool_calls=[
+                    tool_call(
+                        "action-1",
+                        "request_user_action",
+                        '{"title": "Manual step", "instructions": "Complete this step."}',
+                    )
+                ]
+            )
+        ]
     )
 
-    assert result["steps"] == 3
+    def cancel_from_action(_):
+        cancel_event.set()
+        return "Cancelled."
+
+    result = run_with_samples(
+        tmp_path,
+        [],
+        client=client,
+        cancel_event=cancel_event,
+        on_user_action=cancel_from_action,
+    )
+
+    assert result["cancelled"] is True
     assert result["finished"] is False
-    assert "maximum of 3 steps" in logs[-1]
-    assert any("Waiting for DeepSeek response (step 1/3" in line for line in logs)
+    assert len(client.requests) == 1
+
+
+def test_skipped_test_runtime_pauses_then_retries_after_user_confirms(tmp_path, monkeypatch):
+    from src.code_agent import agent
+
+    test_results = iter(
+        [
+            (None, "npm tests skipped: Node.js/npm is not installed"),
+            (True, "tests passed"),
+        ]
+    )
+    monkeypatch.setattr(agent.checker, "run_generated_tests", lambda _: next(test_results))
+    responses = [
+        FakeMessage(
+            tool_calls=[
+                tool_call("1", "write_file", '{"path": "README.md", "content": "# Demo"}'),
+                tool_call("2", "write_file", '{"path": "package.json", "content": "{\\"scripts\\":{\\"test\\":\\"node --test\\"}}"}'),
+                tool_call("3", "write_file", '{"path": "tests/game.test.js", "content": "test"}'),
+                tool_call("4", "write_file", '{"path": "index.html", "content": "<button onclick=play()>Play</button>"}'),
+            ]
+        ),
+        FakeMessage(content="Complete."),
+        FakeMessage(content="Tests are passing now."),
+    ]
+    actions = []
+    fake_client = FakeClient(responses)
+    result = run_with_samples(
+        tmp_path,
+        [],
+        client=fake_client,
+        on_user_action=lambda action: actions.append(action) or "Installed Node.js.",
+    )
+
+    assert result["finished"] is True
+    assert result["tests_passed"] is True
+    assert actions[0]["title"] == "Install test prerequisites"
+    assert any(
+        "Installed Node.js." in message.get("content", "")
+        for message in fake_client.requests[1]["messages"]
+    )
 
 
 def test_agent_repairs_syntax_problem_after_self_check(tmp_path, monkeypatch):
     from src.code_agent import agent
 
-    monkeypatch.setattr(agent.checker, "run_generated_tests", lambda _: (None, "skipped"))
+    monkeypatch.setattr(agent.checker, "run_generated_tests", lambda _: (True, "passed"))
     client = FakeClient(
         [
             FakeMessage(
@@ -369,10 +503,19 @@ def test_agent_repairs_failed_tests_before_marking_generation_complete(tmp_path,
     )
 
 
-def test_agent_does_not_mark_generation_complete_when_tests_still_fail(tmp_path, monkeypatch):
+def test_agent_keeps_repairing_failed_tests_until_the_user_cancels(tmp_path, monkeypatch):
     from src.code_agent import agent
 
-    monkeypatch.setattr(agent.checker, "run_generated_tests", lambda _: (False, "test failed"))
+    cancel_event = Event()
+    attempts = []
+
+    def fail_until_cancelled(_):
+        attempts.append(True)
+        if len(attempts) == 3:
+            cancel_event.set()
+        return False, "test failed"
+
+    monkeypatch.setattr(agent.checker, "run_generated_tests", fail_until_cancelled)
     responses = [
         FakeMessage(
             tool_calls=[
@@ -384,7 +527,44 @@ def test_agent_does_not_mark_generation_complete_when_tests_still_fail(tmp_path,
         )
     ]
     responses.extend(FakeMessage(content="Done.") for _ in range(3))
-    result = run_with_samples(tmp_path, responses)
+    result = run_with_samples(tmp_path, responses, cancel_event=cancel_event)
 
     assert result["tests_passed"] is False
     assert result["finished"] is False
+    assert result["cancelled"] is True
+    assert len(attempts) == 3
+
+
+def test_agent_repairs_more_than_two_times_before_passing(tmp_path, monkeypatch):
+    from src.code_agent import agent
+
+    test_results = iter(
+        [(False, "failure 1"), (False, "failure 2"), (False, "failure 3"), (True, "passed")]
+    )
+    monkeypatch.setattr(agent.checker, "run_generated_tests", lambda _: next(test_results))
+    responses = [
+        FakeMessage(
+            tool_calls=[
+                tool_call("1", "write_file", '{"path": "README.md", "content": "# Demo"}'),
+                tool_call("2", "write_file", '{"path": "requirements.txt", "content": "pytest"}'),
+                tool_call("3", "write_file", '{"path": "tests/test_x.py", "content": "def test_ok():\\n    assert True"}'),
+                tool_call("4", "write_file", '{"path": "index.html", "content": "<button onclick=play()>Play</button>"}'),
+            ]
+        )
+    ]
+    responses.extend(FakeMessage(content="Keep repairing.") for _ in range(4))
+    client = FakeClient(responses)
+
+    result = run_with_samples(tmp_path, [], client=client)
+
+    repair_messages = {
+        id(message): message
+        for request in client.requests
+        for message in request["messages"]
+        if message.get("role") == "user"
+        and message.get("content", "").startswith("Generated project validation failed")
+    }
+    repair_count = len(repair_messages)
+    assert repair_count == 3
+    assert result["tests_passed"] is True
+    assert result["finished"] is True

@@ -4,6 +4,7 @@ from pathlib import Path
 import queue
 import subprocess
 import sys
+from threading import Event
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
@@ -91,6 +92,7 @@ def main():
     status = tk.StringVar(value="Idle")
     events = queue.Queue()
     running = {"thread": None, "cancel_event": None}
+    pending_action = {"request": None}
     input_widgets = []
 
     fields = [
@@ -180,8 +182,6 @@ def main():
             tests_passed = result.get("tests_passed")
             if result.get("finished") and tests_passed is True:
                 status.set("Verified")
-            elif result.get("finished"):
-                status.set("Checks passed (tests not verified)")
             else:
                 status.set("Verification incomplete")
             missing = result.get("missing", [])
@@ -199,8 +199,6 @@ def main():
             status.set("Cancelled")
         elif not result.get("finished", True):
             status.set("Incomplete")
-        elif result.get("tests_passed") is None:
-            status.set("Finished (tests not verified)")
         else:
             status.set("Finished")
         files = result.get("files", [])
@@ -211,6 +209,95 @@ def main():
             warning = "Missing required output: " + ", ".join(missing)
             append_log(warning)
             messagebox.showwarning("Incomplete project", warning, parent=root)
+        if result.get("incomplete_reason"):
+            append_log("Incomplete: " + result["incomplete_reason"])
+            status.set("Incomplete")
+
+    def complete_user_action(request, response):
+        if request.get("dialog") is not None:
+            try:
+                request["dialog"].grab_release()
+                request["dialog"].destroy()
+            except tk.TclError:
+                pass
+        request["response"] = response
+        if pending_action["request"] is request:
+            pending_action["request"] = None
+        request["event"].set()
+
+    def show_user_action(request):
+        if request["event"].is_set():
+            return
+        if not root.winfo_exists():
+            complete_user_action(request, "User cancelled generation because the window closed.")
+            return
+        status.set("Waiting for you")
+        dialog = tk.Toplevel(root)
+        request["dialog"] = dialog
+        dialog.title(request["action"]["title"])
+        dialog.transient(root)
+        dialog.resizable(True, True)
+        dialog.minsize(430, 260)
+        frame = ttk.Frame(dialog, padding=18)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(
+            frame,
+            text=request["action"]["title"],
+            font=("Segoe UI", 12, "bold"),
+        ).pack(anchor="w", pady=(0, 8))
+        ttk.Label(
+            frame,
+            text=request["action"]["instructions"],
+            justify="left",
+            wraplength=580,
+        ).pack(anchor="w", fill="x", pady=(0, 10))
+        ttk.Label(frame, text="Optional result or details for the agent:").pack(anchor="w")
+        ttk.Label(
+            frame,
+            text="Do not enter passwords, API keys, or other secrets here.",
+            foreground="#8a3b12",
+        ).pack(anchor="w")
+        response_text = scrolledtext.ScrolledText(frame, height=4, wrap="word")
+        response_text.pack(fill="both", expand=True, pady=(4, 12))
+        buttons = ttk.Frame(frame)
+        buttons.pack(fill="x")
+
+        def continue_generation():
+            details = response_text.get("1.0", "end").strip()
+            complete_user_action(
+                request, details or "The user completed the requested task."
+            )
+            status.set("Running")
+
+        def cancel_generation():
+            cancel_event = running["cancel_event"]
+            if cancel_event is not None:
+                cancel_event.set()
+            complete_user_action(request, "The user cancelled generation. Stop now.")
+            status.set("Cancelling")
+            append_log("Cancellation requested...")
+
+        ttk.Button(buttons, text="OK - continue", command=continue_generation).pack(
+            side="right"
+        )
+        ttk.Button(buttons, text="Cancel run", command=cancel_generation).pack(
+            side="right", padx=(0, 8)
+        )
+        dialog.protocol("WM_DELETE_WINDOW", cancel_generation)
+        dialog.grab_set()
+        response_text.focus_set()
+
+    def request_user_action(action):
+        request = {
+            "action": action,
+            "event": Event(),
+            "response": None,
+            "dialog": None,
+        }
+        pending_action["request"] = request
+        events.put(("action_required", request))
+        request["event"].wait()
+        return request["response"] or "The user cancelled generation."
 
     def poll_events():
         try:
@@ -218,6 +305,8 @@ def main():
                 kind, payload = events.get_nowait()
                 if kind == "log":
                     append_log(payload)
+                elif kind == "action_required":
+                    show_user_action(payload)
                 else:
                     finish(payload)
         except queue.Empty:
@@ -237,6 +326,10 @@ def main():
 
         status.set("Running")
         append_log("Starting agent run...")
+        append_log(
+            "The agent will keep repairing and rerunning checks until they pass or you "
+            "cancel. Repair rounds make additional DeepSeek API requests and may use credits."
+        )
         open_button.configure(state="disabled")
         set_running(True)
         thread, cancel_event = start_run(
@@ -246,6 +339,7 @@ def main():
             output_directory.get(),
             lambda line: events.put(("log", line)),
             lambda result: events.put(("done", result)),
+            on_user_action=request_user_action,
         )
         running["thread"] = thread
         running["cancel_event"] = cancel_event
@@ -291,6 +385,9 @@ def main():
         if cancel_event is not None:
             cancel_event.set()
             append_log("Cancellation requested...")
+        request = pending_action["request"]
+        if request is not None:
+            complete_user_action(request, "The user cancelled generation. Stop now.")
 
     def open_output_folder():
         output = output_directory.get()
@@ -308,6 +405,11 @@ def main():
         cancel_event = running["cancel_event"]
         if cancel_event is not None:
             cancel_event.set()
+        request = pending_action["request"]
+        if request is not None:
+            complete_user_action(
+                request, "The user cancelled generation because the window closed."
+            )
         root.destroy()
 
     validate_button = ttk.Button(content, text="Validate inputs", command=check_inputs)
