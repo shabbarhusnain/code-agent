@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import subprocess
 
@@ -117,8 +118,25 @@ def test_generated_node_tests_run_through_npm_without_installing(
 
     assert passed is True
     assert "2 tests passed" in output
-    assert calls[0][0] == ["npm.cmd", "test"]
+    expected_command, expected_shell = checker._npm_test_command(
+        "npm.cmd", windows=os.name == "nt"
+    )
+    assert calls[0][0] == expected_command
+    assert calls[0][1]["shell"] is expected_shell
     assert calls[0][1]["cwd"] == tmp_path
+
+
+@pytest.mark.parametrize(
+    ("windows", "expected", "use_shell"),
+    [
+        (True, '"C:\\Program Files\\nodejs\\npm.cmd" test', True),
+        (False, ["/usr/bin/npm", "test"], False),
+    ],
+)
+def test_npm_test_command_supports_platform_launcher(windows, expected, use_shell):
+    npm = "C:\\Program Files\\nodejs\\npm.cmd" if windows else "/usr/bin/npm"
+
+    assert checker._npm_test_command(npm, windows=windows) == (expected, use_shell)
 
 
 def test_generated_node_test_failures_are_reported_for_repair(tmp_path, monkeypatch):

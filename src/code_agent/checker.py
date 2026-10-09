@@ -246,15 +246,16 @@ def run_generated_tests(out_dir, timeout=120):
         if not npm:
             results.append((None, "npm tests skipped: Node.js/npm is not installed"))
         else:
+            command, use_shell = _npm_test_command(npm)
             try:
                 completed = subprocess.run(
-                    [npm, "test"],
+                    command,
                     cwd=root,
                     text=True,
                     capture_output=True,
                     timeout=timeout,
                     check=False,
-                    shell=False,
+                    shell=use_shell,
                     env=os.environ.copy(),
                 )
                 output = (completed.stdout + completed.stderr).strip()
@@ -298,6 +299,15 @@ def _missing_node_dependency(output, package):
         **package.get("devDependencies", {}),
     }
     return module if module in dependencies else None
+
+
+def _npm_test_command(npm, windows=None):
+    """Build a subprocess command that can launch npm's Windows .cmd shim."""
+    if windows is None:
+        windows = os.name == "nt"
+    if windows:
+        return f'"{npm}" test', True
+    return [npm, "test"], False
 
 
 def _missing_declared_test_dependency(output, requirements):

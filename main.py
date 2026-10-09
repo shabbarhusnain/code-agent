@@ -176,9 +176,14 @@ def main():
             return
 
         cancelled = result.get("cancelled", False)
-        status.set(
-            "Cancelled" if cancelled else "Finished" if result.get("finished", True) else "Incomplete"
-        )
+        if cancelled:
+            status.set("Cancelled")
+        elif not result.get("finished", True):
+            status.set("Incomplete")
+        elif result.get("tests_passed") is None:
+            status.set("Finished (tests not verified)")
+        else:
+            status.set("Finished")
         files = result.get("files", [])
         append_log(f"Wrote {len(files)} files to {output_directory.get()}")
         open_button.configure(state="normal")
