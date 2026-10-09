@@ -1,6 +1,8 @@
-"""In-process validation for generated Python projects."""
+"""In-process validation for generated Python and Node.js projects."""
 
 import ast
+from html.parser import HTMLParser
+import json
 import os
 from pathlib import Path
 import re
@@ -48,11 +50,39 @@ def check_project(out_dir):
     problems = []
     if not (root / "README.md").is_file():
         problems.append("missing README.md")
-    if not (root / "requirements.txt").is_file():
-        problems.append("missing requirements.txt")
-    tests_dir = root / "tests"
-    if not tests_dir.is_dir() or not any(path.is_file() for path in tests_dir.rglob("*")):
-        problems.append("no tests/ file")
+    if not any((root / name).is_file() for name in ("requirements.txt", "package.json")):
+        problems.append("missing dependency manifest (requirements.txt or package.json)")
+    has_test_files = any(
+        path.is_file()
+        and (
+            "tests" in path.relative_to(root).parts
+            or "test" in path.relative_to(root).parts
+            or path.name.startswith("test.")
+        )
+        for path in root.rglob("*")
+    )
+    if not has_test_files:
+        problems.append("no project test files (tests/ or test/)")
+
+    package_json = root / "package.json"
+    javascript_files = [
+        path
+        for path in root.rglob("*")
+        if path.suffix.lower() in {".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx"}
+        and "node_modules" not in path.parts
+    ]
+    if package_json.is_file() and javascript_files:
+        try:
+            package = json.loads(package_json.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            problems.append(f"invalid package.json: {error}")
+        else:
+            if not isinstance(package, dict):
+                problems.append("package.json must contain a JSON object")
+            elif not isinstance(package.get("scripts", {}), dict):
+                problems.append("package.json scripts must be a JSON object")
+            elif not package.get("scripts", {}).get("test"):
+                problems.append("package.json is missing a test script")
 
     python_files = [path for path in root.rglob("*.py") if "__pycache__" not in path.parts]
     requirements = _requirements(root)
@@ -82,33 +112,203 @@ def check_project(out_dir):
     return problems
 
 
-def run_generated_tests(out_dir, timeout=120):
-    """Run generated tests with a system Python when one is available."""
-    python = shutil.which("python") or shutil.which("py")
-    if not python:
-        return None, "skipped: no system Python"
-    root = Path(out_dir)
-    try:
-        completed = subprocess.run(
-            [python, "-m", "pytest", "-q", "-p", "no:cacheprovider"],
-            cwd=root,
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
-            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+class _PageFeatures(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.tags = set()
+        self.script_sources = []
+        self.inline_script = False
+        self.inline_handlers = False
+
+    def handle_starttag(self, tag, attrs):
+        self.tags.add(tag.lower())
+        self.inline_handlers = self.inline_handlers or any(
+            name.lower() in {"onclick", "onchange", "oninput", "onsubmit"}
+            for name, _ in attrs
         )
-        output = (completed.stdout + completed.stderr).strip()
-        ok = completed.returncode == 0
-    except subprocess.TimeoutExpired as error:
-        output = (error.stdout or "") + (error.stderr or "")
-        ok = False
-        output = f"tests timed out after {timeout} seconds\n{output}"
-    finally:
-        _remove_test_artifacts(root)
+        if tag.lower() == "script":
+            attributes = dict(attrs)
+            source = attributes.get("src")
+            if source:
+                self.script_sources.append(source)
+            else:
+                self.inline_script = True
+
+
+def check_browser_ui(out_dir):
+    """Check that a documented browser application has an interactive HTML entry."""
+    root = Path(out_dir)
+    pages = list(root.rglob("*.html"))
+    if not pages:
+        return ["missing browser UI HTML page"]
+
+    for page in pages:
+        try:
+            content = page.read_text(encoding="utf-8")
+            parser = _PageFeatures()
+            parser.feed(content)
+        except (OSError, UnicodeError, ValueError):
+            continue
+
+        linked_scripts = []
+        for source in parser.script_sources:
+            source_path_text = source.split("?", 1)[0].split("#", 1)[0]
+            if source_path_text.startswith("/"):
+                source_path_text = source_path_text.lstrip("/")
+                source_path = root / source_path_text
+            else:
+                source_path = page.parent / source_path_text
+            source_path = source_path.resolve()
+            try:
+                source_path.relative_to(root.resolve())
+                if source_path.is_file():
+                    linked_scripts.append(source_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, ValueError):
+                continue
+
+        script = "\n".join(linked_scripts)
+        if parser.inline_script:
+            script += "\n" + content
+        has_controls = bool(parser.tags.intersection({"button", "form", "input", "select", "textarea"}))
+        has_interaction = bool(
+            parser.inline_handlers
+            or
+            re.search(
+                r"\baddEventListener\s*\(|\bon(?:click|change|input|submit)\s*=|"
+                r"\bon(?:Click|Change|Input|Submit)\s*=|"
+                r"\b(fetch|XMLHttpRequest)\s*\(",
+                script,
+            )
+        )
+        if has_controls and has_interaction:
+            return []
+
+    return ["browser UI must include interactive controls wired to application behavior"]
+
+
+def run_generated_tests(out_dir, timeout=120):
+    """Run the available project test suites without installing dependencies."""
+    root = Path(out_dir)
+    python_files = [
+        path for path in root.rglob("*.py") if "__pycache__" not in path.parts
+    ]
+    package_json = root / "package.json"
+    javascript_files = [
+        path
+        for path in root.rglob("*")
+        if path.suffix.lower() in {".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx"}
+        and "node_modules" not in path.parts
+    ]
+    package = {}
+    if package_json.is_file():
+        try:
+            package = json.loads(package_json.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            package = {}
+
+    results = []
+    if python_files:
+        python = shutil.which("python") or shutil.which("py")
+        if not python:
+            results.append((None, "pytest skipped: no system Python"))
+        else:
+            requirements = _requirements(root)
+            try:
+                completed = subprocess.run(
+                    [python, "-m", "pytest", "-q", "-p", "no:cacheprovider"],
+                    cwd=root,
+                    text=True,
+                    capture_output=True,
+                    timeout=timeout,
+                    check=False,
+                    env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+                )
+                output = (completed.stdout + completed.stderr).strip()
+                missing_dependency = _missing_declared_test_dependency(output, requirements)
+                if missing_dependency:
+                    results.append(
+                        (
+                            None,
+                            f"pytest skipped: declared dependency '{missing_dependency}' "
+                            "is not installed; install requirements.txt to run tests",
+                        )
+                    )
+                else:
+                    results.append((completed.returncode == 0, output or "pytest completed"))
+            except subprocess.TimeoutExpired as error:
+                output = (error.stdout or "") + (error.stderr or "")
+                results.append((False, f"pytest timed out after {timeout} seconds\n{output}"))
+            finally:
+                _remove_test_artifacts(root)
+
+    if javascript_files and package.get("scripts", {}).get("test"):
+        npm = shutil.which("npm") or shutil.which("npm.cmd")
+        if not npm:
+            results.append((None, "npm tests skipped: Node.js/npm is not installed"))
+        else:
+            try:
+                completed = subprocess.run(
+                    [npm, "test"],
+                    cwd=root,
+                    text=True,
+                    capture_output=True,
+                    timeout=timeout,
+                    check=False,
+                    shell=False,
+                    env=os.environ.copy(),
+                )
+                output = (completed.stdout + completed.stderr).strip()
+                missing_dependency = _missing_node_dependency(output, package)
+                if missing_dependency:
+                    results.append(
+                        (
+                            None,
+                            f"npm tests skipped: dependency '{missing_dependency}' is not "
+                            "installed; run npm install before rerunning tests",
+                        )
+                    )
+                else:
+                    results.append((completed.returncode == 0, output or "npm test completed"))
+            except subprocess.TimeoutExpired as error:
+                output = (error.stdout or "") + (error.stderr or "")
+                results.append((False, f"npm test timed out after {timeout} seconds\n{output}"))
+
+    if not results:
+        return None, "tests skipped: no supported Python or Node.js test suite found"
+
+    outcomes = [passed for passed, _ in results]
+    passed = False if False in outcomes else None if None in outcomes else True
+    output = "\n\n".join(message for _, message in results)
     if len(output) > 4_000:
         output = output[:4_000] + "... [truncated]"
-    return ok, output
+    return passed, output
+
+
+def _missing_node_dependency(output, package):
+    match = re.search(
+        r"Cannot find (?:module|package) ['\"]([^'\"]+)['\"]", output
+    )
+    if not match:
+        return None
+    module = match.group(1).split("/", 1)[0]
+    if module.startswith("@"):
+        module = "/".join(match.group(1).split("/")[:2])
+    dependencies = {
+        **package.get("dependencies", {}),
+        **package.get("devDependencies", {}),
+    }
+    return module if module in dependencies else None
+
+
+def _missing_declared_test_dependency(output, requirements):
+    match = re.search(
+        r"(?:ModuleNotFoundError|ImportError): No module named ['\"]([^'\"]+)['\"]",
+        output,
+    )
+    if not match:
+        return None
+    module = match.group(1).split(".", 1)[0].replace("-", "_").lower()
+    return module if module in requirements else None
 
 
 def _remove_test_artifacts(root):

@@ -4,12 +4,52 @@ from types import SimpleNamespace
 
 import pytest
 
-from main import validate_inputs
-from src.code_agent import config
-from src.code_agent.agent import run_agent
+from main import default_sample_paths, validate_inputs
+from src.code_agent import config, preprocess
+from src.code_agent.agent import (
+    SYSTEM_PROMPT,
+    _required_missing,
+    _requires_browser_ui,
+    run_agent,
+)
 
 
 SAMPLES = Path(__file__).parents[1] / "samples"
+
+
+def test_default_sample_paths_point_to_bundled_architecture_files():
+    assert default_sample_paths() == (
+        str(SAMPLES / "Architecture_Documentation.md"),
+        str(SAMPLES / "Architecture_View.md"),
+    )
+
+
+def test_generation_prompt_requires_architecture_faithful_user_interfaces():
+    assert "Do not replace a specified stack with Python" in SYSTEM_PROMPT
+    assert "A backend, API docs, or" in SYSTEM_PROMPT
+    assert "static mockup alone is not a complete UI" in SYSTEM_PROMPT
+    assert "complete described play loop" in SYSTEM_PROMPT
+
+
+def test_sample_architecture_requires_a_browser_ui():
+    documentation = SAMPLES / "Architecture_Documentation.md"
+    views = SAMPLES / "Architecture_View.md"
+    parsed = preprocess.build_agent_input(
+        documentation.read_text(encoding="utf-8"),
+        views.read_text(encoding="utf-8"),
+    )
+
+    assert _requires_browser_ui(parsed)
+    assert "a browser UI (.html file) required by the architecture" in _required_missing(
+        ["README.md", "requirements.txt", "tests/test_game.py"],
+        require_browser_ui=True,
+    )
+
+
+def test_web_ui_requirement_is_detected_in_architecture_tables():
+    assert _requires_browser_ui(
+        {"documentation": [{"tables": [{"rows": [{"Requirement": "Build a web-based UI"}]}]}]}
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -122,6 +162,7 @@ def test_agent_writes_required_project_files_and_finishes(tmp_path):
                     tool_call("1", "write_file", '{"path": "README.md", "content": "# Demo"}'),
                     tool_call("2", "write_file", '{"path": "requirements.txt", "content": "pytest"}'),
                     tool_call("3", "write_file", '{"path": "tests/test_x.py", "content": "def test_ok():\\n    assert True"}'),
+                    tool_call("4", "write_file", '{"path": "index.html", "content": "<button onclick=play()>Play</button>"}'),
                 ]
             ),
             FakeMessage(content="Project complete."),
@@ -130,7 +171,9 @@ def test_agent_writes_required_project_files_and_finishes(tmp_path):
 
     assert result["finished"] is True
     assert result["missing"] == []
-    assert result["files"] == ["README.md", "requirements.txt", "tests/test_x.py"]
+    assert result["files"] == [
+        "README.md", "index.html", "requirements.txt", "tests/test_x.py"
+    ]
 
 
 def test_agent_returns_tool_error_for_invalid_json_and_continues(tmp_path):
@@ -142,14 +185,17 @@ def test_agent_returns_tool_error_for_invalid_json_and_continues(tmp_path):
             FakeMessage(content="Finally done."),
         ]
     )
+    logs = []
     result = run_agent(
         "not-used", SAMPLES / "Architecture_Documentation.md", SAMPLES / "Architecture_View.md",
-        tmp_path / "project", log=lambda _: None, client=client,
+        tmp_path / "project", log=logs.append, client=client,
     )
 
     tool_messages = [message for message in client.requests[1]["messages"] if message["role"] == "tool"]
     assert tool_messages[0]["content"].startswith("ERROR: Invalid tool arguments:")
-    assert result["finished"] is True
+    assert result["finished"] is False
+    assert "a browser UI (.html file) required by the architecture" in result["missing"]
+    assert "Generation is incomplete because required deliverables are still missing." in logs
 
 
 def test_agent_reminds_model_once_then_accepts_missing_file_fix(tmp_path):
@@ -157,8 +203,11 @@ def test_agent_reminds_model_once_then_accepts_missing_file_fix(tmp_path):
         [
             FakeMessage(tool_calls=[tool_call("1", "write_file", '{"path": "requirements.txt", "content": ""}')]),
             FakeMessage(content="Done."),
-            FakeMessage(tool_calls=[tool_call("2", "write_file", '{"path": "README.md", "content": "# Ready"}')]),
-            FakeMessage(tool_calls=[tool_call("3", "write_file", '{"path": "tests/test_x.py", "content": ""}')]),
+            FakeMessage(tool_calls=[
+                tool_call("2", "write_file", '{"path": "README.md", "content": "# Ready"}'),
+                tool_call("3", "write_file", '{"path": "tests/test_x.py", "content": ""}'),
+                tool_call("4", "write_file", '{"path": "index.html", "content": "<button onclick=play()>Play</button>"}'),
+            ]),
             FakeMessage(content="Finished."),
         ]
     )
@@ -201,6 +250,7 @@ def test_agent_stops_at_configured_step_limit(tmp_path, monkeypatch):
     assert result["steps"] == 3
     assert result["finished"] is False
     assert "maximum of 3 steps" in logs[-1]
+    assert any("Waiting for DeepSeek response (step 1/3" in line for line in logs)
 
 
 def test_agent_repairs_syntax_problem_after_self_check(tmp_path, monkeypatch):
@@ -215,6 +265,7 @@ def test_agent_repairs_syntax_problem_after_self_check(tmp_path, monkeypatch):
                     tool_call("2", "write_file", '{"path": "requirements.txt", "content": "pytest"}'),
                     tool_call("3", "write_file", '{"path": "tests/test_x.py", "content": "def test_ok():\\n    assert True"}'),
                     tool_call("4", "write_file", '{"path": "app.py", "content": "def broken(:\\n"}'),
+                    tool_call("6", "write_file", '{"path": "index.html", "content": "<button onclick=play()>Play</button>"}'),
                 ]
             ),
             FakeMessage(content="Done."),
@@ -229,9 +280,70 @@ def test_agent_repairs_syntax_problem_after_self_check(tmp_path, monkeypatch):
 
     repair_messages = [
         message for request in client.requests for message in request["messages"]
-        if message["role"] == "user" and message["content"].startswith("Self-check found")
+        if message["role"] == "user" and message["content"].startswith("Generated project validation failed")
     ]
     assert repair_messages
     assert result["problems"] == []
     assert result["finished"] is True
     assert (tmp_path / "project" / "RUN_LOG.txt").is_file()
+
+
+def test_agent_repairs_failed_tests_before_marking_generation_complete(tmp_path, monkeypatch):
+    from src.code_agent import agent
+
+    test_results = iter([(False, "assert 1 == 2"), (True, "2 passed")])
+    monkeypatch.setattr(agent.checker, "run_generated_tests", lambda _: next(test_results))
+    client = FakeClient(
+        [
+            FakeMessage(
+                tool_calls=[
+                    tool_call("1", "write_file", '{"path": "README.md", "content": "# Demo"}'),
+                    tool_call("2", "write_file", '{"path": "requirements.txt", "content": "pytest"}'),
+                    tool_call("3", "write_file", '{"path": "tests/test_x.py", "content": "def test_ok():\\n    assert True"}'),
+                    tool_call("4", "write_file", '{"path": "index.html", "content": "<button onclick=play()>Play</button>"}'),
+                ]
+            ),
+            FakeMessage(content="Done."),
+            FakeMessage(
+                tool_calls=[
+                    tool_call("5", "write_file", '{"path": "app.py", "content": "def play(): return True"}'),
+                ]
+            ),
+            FakeMessage(content="Fixed."),
+        ]
+    )
+
+    result = run_agent(
+        "not-used", SAMPLES / "Architecture_Documentation.md", SAMPLES / "Architecture_View.md",
+        tmp_path / "project", log=lambda _: None, client=client,
+    )
+
+    assert result["tests_passed"] is True
+    assert result["finished"] is True
+    assert any(
+        message["role"] == "user"
+        and "Generated test output" in message["content"]
+        for request in client.requests
+        for message in request["messages"]
+    )
+
+
+def test_agent_does_not_mark_generation_complete_when_tests_still_fail(tmp_path, monkeypatch):
+    from src.code_agent import agent
+
+    monkeypatch.setattr(agent.checker, "run_generated_tests", lambda _: (False, "test failed"))
+    responses = [
+        FakeMessage(
+            tool_calls=[
+                tool_call("1", "write_file", '{"path": "README.md", "content": "# Demo"}'),
+                tool_call("2", "write_file", '{"path": "requirements.txt", "content": "pytest"}'),
+                tool_call("3", "write_file", '{"path": "tests/test_x.py", "content": "def test_ok():\\n    assert True"}'),
+                tool_call("4", "write_file", '{"path": "index.html", "content": "<button onclick=play()>Play</button>"}'),
+            ]
+        )
+    ]
+    responses.extend(FakeMessage(content="Done.") for _ in range(3))
+    result = run_with_samples(tmp_path, responses)
+
+    assert result["tests_passed"] is False
+    assert result["finished"] is False

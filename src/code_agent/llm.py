@@ -39,6 +39,11 @@ def chat(client, messages, tools=None, sleep=time.sleep):
         except openai.AuthenticationError as error:
             raise RuntimeError("Invalid API key") from error
         except openai.APIError as error:
+            if isinstance(error, openai.APIStatusError) and error.status_code == 402:
+                raise RuntimeError(
+                    "DeepSeek reports insufficient balance (HTTP 402). "
+                    "Add funds to your DeepSeek account, then retry."
+                ) from error
             if not _retryable(error) or delay is None:
                 raise RuntimeError(f"DeepSeek API request failed: {error}") from error
             sleep(delay)

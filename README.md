@@ -1,6 +1,6 @@
 # Code Agent
 
-Code Agent is a simplified, desktop code-generation agent inspired by Claude Code. It reads an `Architecture_Documentation.md` file and an `Architecture_View.md` file containing PlantUML views, then uses the DeepSeek API to generate a complete Python project in a selected output folder.
+Code Agent is a simplified, desktop code-generation agent inspired by Claude Code. It reads an `Architecture_Documentation.md` file and an `Architecture_View.md` file containing PlantUML views, then uses the DeepSeek API to generate a project that follows the stack and user workflows described in those inputs.
 
 ## Features
 
@@ -8,20 +8,21 @@ Code Agent is a simplified, desktop code-generation agent inspired by Claude Cod
 - Markdown and PlantUML preprocessing into structured architecture data.
 - A bounded DeepSeek tool-calling loop with safe workspace-only file tools.
 - The official OpenAI-compatible DeepSeek API endpoint using model `deepseek-v4-pro`.
-- Completion checks, syntax/import self-checking, up to two repair rounds, and generated-test execution when a system Python is available.
+- Required-deliverable checks, Python syntax/import checks, up to two repair rounds, and generated pytest/npm test execution when a compatible runtime is available.
+- Architecture-aware generation: documented web/graphical applications must include a real UI, not just backend APIs; browser applications must include an HTML entry page.
 - Cancellation, progress logs, and a redacted `RUN_LOG.txt` in generated output.
 - Windows executable packaging and GitHub Actions CI/release automation.
 
 ## Architecture
 
-The preprocessor turns the documentation and PlantUML into structured JSON. The agent supplies that JSON to DeepSeek, which can only write, read, and list files inside the output workspace. After generation, the project is checked for required files, Python syntax, and likely undeclared imports; the agent can repair detected issues before results are returned.
+The preprocessor turns the documentation and PlantUML into structured JSON. The agent supplies that JSON to DeepSeek, which can only write, read, and list files inside the output workspace. The agent is instructed to follow the documented language and implement user-facing flows as working interfaces. The output is checked for a README, dependency manifest, tests, and—when the architecture describes a web app—an interactive HTML UI. Python syntax and likely undeclared imports are checked; Python projects run pytest and Node.js projects run their `npm test` script when those runtimes are available. Failed checks are sent back to the model for up to two repair rounds.
 
 ```mermaid
 flowchart LR
     A[Architecture Markdown + PlantUML] --> B[preprocess]
     B --> C[Agent loop + workspace tools]
     C --> D[Generated project]
-    D --> E[Self-check and optional repair]
+    D --> E[Requirement checks, tests, and optional repair]
     E --> F[Output folder]
 ```
 
@@ -50,7 +51,7 @@ flowchart LR
 
 1. Start `CodeAgent.exe`.
 2. Enter a DeepSeek API key.
-3. Select `Architecture_Documentation.md` and `Architecture_View.md`.
+3. The bundled `Architecture_Documentation.md` and `Architecture_View.md` samples are selected automatically; use **Browse...** to choose different files.
 4. Select an existing output folder.
 5. Click **Run**. The log tracks progress; **Cancel** requests a safe stop.
 
@@ -107,6 +108,8 @@ Download the executable from a successful workflow run’s artifacts, or from th
 
 ## Limitations
 
-- A DeepSeek API key and internet connection are required for generation.
+- A DeepSeek API key with sufficient account balance and internet connection are required for generation. HTTP 402 insufficient-balance errors are reported directly; add funds to the DeepSeek account before retrying.
+- DeepSeek responses can take time; the log displays the current request step and the 120-second request timeout while waiting.
+- Generated tests that require runtimes or declared packages missing from the local machine are reported as skipped, not as model failures. Install the generated project manifest and rerun the tests to verify them.
 - Generated output quality depends on the model and the supplied architecture documents.
 - The packaged executable is Windows-only. It is unsigned, so Windows SmartScreen may show a warning.

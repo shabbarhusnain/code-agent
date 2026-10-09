@@ -32,6 +32,14 @@ def validate_inputs(api_key, documentation_path, views_path, output_directory):
     return None
 
 
+def default_sample_paths():
+    """Return the bundled architecture sample paths."""
+    return (
+        str(resource_path("samples/Architecture_Documentation.md")),
+        str(resource_path("samples/Architecture_View.md")),
+    )
+
+
 def selftest():
     """Verify imports and bundled sample resources without starting the GUI."""
     try:
@@ -76,8 +84,9 @@ def main():
     )
 
     api_key = tk.StringVar()
-    documentation_path = tk.StringVar()
-    views_path = tk.StringVar()
+    sample_documentation, sample_views = default_sample_paths()
+    documentation_path = tk.StringVar(value=sample_documentation)
+    views_path = tk.StringVar(value=sample_views)
     output_directory = tk.StringVar()
     status = tk.StringVar(value="Idle")
     events = queue.Queue()
@@ -167,7 +176,9 @@ def main():
             return
 
         cancelled = result.get("cancelled", False)
-        status.set("Cancelled" if cancelled else "Finished")
+        status.set(
+            "Cancelled" if cancelled else "Finished" if result.get("finished", True) else "Incomplete"
+        )
         files = result.get("files", [])
         append_log(f"Wrote {len(files)} files to {output_directory.get()}")
         open_button.configure(state="normal")

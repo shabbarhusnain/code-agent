@@ -45,6 +45,19 @@ def test_chat_wraps_openai_api_errors_as_runtime_errors():
         chat(client, [])
 
 
+def test_chat_explains_insufficient_balance_without_retrying():
+    client = Mock()
+    client.chat.completions.create.side_effect = openai.APIStatusError(
+        "Insufficient Balance",
+        response=Mock(status_code=402),
+        body={"error": {"message": "Insufficient Balance"}},
+    )
+
+    with pytest.raises(RuntimeError, match="insufficient balance.*Add funds"):
+        chat(client, [], sleep=lambda _: pytest.fail("should not retry"))
+    assert client.chat.completions.create.call_count == 1
+
+
 def test_chat_retries_transient_failures_and_succeeds_on_third_attempt():
     message = SimpleNamespace(content="recovered")
     client = Mock()
