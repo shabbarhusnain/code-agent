@@ -224,7 +224,48 @@ def test_generated_node_tests_run_with_installed_windows_npm(tmp_path):
     assert "fraction game logic" in output
 
 
-def test_generated_node_tests_report_missing_declared_dependencies(tmp_path, monkeypatch):
+def test_generated_node_tests_install_missing_declared_dependency_and_retry(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "package.json").write_text(
+        json.dumps({
+            "scripts": {"test": "node --test tests/"},
+            "devDependencies": {"supertest": "1.0"},
+        }),
+        encoding="utf-8",
+    )
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "app.test.js").write_text("test", encoding="utf-8")
+    monkeypatch.setattr(checker.shutil, "which", lambda name: "npm" if name == "npm" else None)
+
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        if len(calls) == 1:
+            return subprocess.CompletedProcess(
+                command, 1, "", "Error: Cannot find module 'supertest'"
+            )
+        if len(calls) == 2:
+            return subprocess.CompletedProcess(command, 0, "added 1 package", "")
+        return subprocess.CompletedProcess(command, 0, "tests passed", "")
+
+    monkeypatch.setattr(
+        checker.subprocess,
+        "run",
+        run,
+    )
+
+    passed, output = checker.run_generated_tests(tmp_path)
+
+    assert passed is True
+    assert "Installed project dependencies with npm install." in output
+    assert len(calls) == 3
+    assert "install --no-audit --no-fund" in calls[1][0]
+    assert all(call[1]["cwd"] == tmp_path for call in calls)
+
+
+def test_generated_node_tests_report_npm_install_failure(tmp_path, monkeypatch):
     (tmp_path / "package.json").write_text(
         json.dumps({
             "scripts": {"test": "node --test tests/"},
@@ -239,14 +280,20 @@ def test_generated_node_tests_report_missing_declared_dependencies(tmp_path, mon
         checker.subprocess,
         "run",
         lambda command, **kwargs: subprocess.CompletedProcess(
-            command, 1, "", "Error: Cannot find module 'express'"
+            command,
+            1,
+            "",
+            "Cannot find module 'express'"
+            if " test" in str(command)
+            else "registry unavailable",
         ),
     )
 
     passed, output = checker.run_generated_tests(tmp_path)
 
     assert passed is None
-    assert "dependency 'express' is not installed" in output
+    assert "npm dependency install failed for 'express'" in output
+    assert "registry unavailable" in output
 
 
 def test_browser_ui_checker_accepts_interactive_game_page(tmp_path):

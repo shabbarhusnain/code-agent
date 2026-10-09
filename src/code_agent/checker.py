@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 
 def _requirements(root):
@@ -187,7 +188,7 @@ def check_browser_ui(out_dir):
 
 
 def run_generated_tests(out_dir, timeout=120):
-    """Run the available project test suites without installing dependencies."""
+    """Run available tests and install a declared missing Node dependency once."""
     root = Path(out_dir)
     python_files = [
         path for path in root.rglob("*.py") if "__pycache__" not in path.parts
@@ -247,6 +248,8 @@ def run_generated_tests(out_dir, timeout=120):
             results.append((None, "npm tests skipped: Node.js/npm is not installed"))
         else:
             command, use_shell = _npm_test_command(npm)
+            npm_env = _npm_environment(npm)
+            started = time.monotonic()
             try:
                 completed = subprocess.run(
                     command,
@@ -261,13 +264,74 @@ def run_generated_tests(out_dir, timeout=120):
                 output = (completed.stdout + completed.stderr).strip()
                 missing_dependency = _missing_node_dependency(output, package)
                 if missing_dependency:
-                    results.append(
-                        (
-                            None,
-                            f"npm tests skipped: dependency '{missing_dependency}' is not "
-                            "installed; run npm install before rerunning tests",
+                    install_command, install_use_shell = _npm_install_command(npm)
+                    try:
+                        install = subprocess.run(
+                            install_command,
+                            cwd=root,
+                            text=True,
+                            capture_output=True,
+                            timeout=max(1, timeout - (time.monotonic() - started)),
+                            check=False,
+                            shell=install_use_shell,
+                            env=npm_env,
                         )
-                    )
+                    except subprocess.TimeoutExpired as error:
+                        install_output = (error.stdout or "") + (error.stderr or "")
+                        results.append(
+                            (
+                                None,
+                                f"npm dependency install failed: timed out while installing "
+                                f"'{missing_dependency}'\n{install_output}",
+                            )
+                        )
+                    else:
+                        install_output = (
+                            install.stdout + install.stderr
+                        ).strip()
+                        if install.returncode != 0:
+                            results.append(
+                                (
+                                    None,
+                                    f"npm dependency install failed for '{missing_dependency}' "
+                                    f"(exit code {install.returncode})\n{install_output}",
+                                )
+                            )
+                        else:
+                            retry_command, retry_use_shell = _npm_test_command(npm)
+                            try:
+                                retry = subprocess.run(
+                                    retry_command,
+                                    cwd=root,
+                                    text=True,
+                                    capture_output=True,
+                                    timeout=max(
+                                        1, timeout - (time.monotonic() - started)
+                                    ),
+                                    check=False,
+                                    shell=retry_use_shell,
+                                    env=npm_env,
+                                )
+                            except subprocess.TimeoutExpired as error:
+                                retry_output = (error.stdout or "") + (error.stderr or "")
+                                results.append(
+                                    (
+                                        False,
+                                        "npm install completed, but tests timed out "
+                                        f"after {timeout} seconds\n{retry_output}",
+                                    )
+                                )
+                            else:
+                                retry_output = (
+                                    retry.stdout + retry.stderr
+                                ).strip()
+                                results.append(
+                                    (
+                                        retry.returncode == 0,
+                                        "Installed project dependencies with npm install.\n"
+                                        + (retry_output or "npm test completed"),
+                                    )
+                                )
                 else:
                     results.append((completed.returncode == 0, output or "npm test completed"))
             except subprocess.TimeoutExpired as error:
@@ -360,6 +424,16 @@ def _npm_test_command(npm, windows=None):
     if windows:
         return f'"{npm}" test', True
     return [npm, "test"], False
+
+
+def _npm_install_command(npm, windows=None):
+    """Build a non-interactive npm install command for the generated project."""
+    if windows is None:
+        windows = os.name == "nt"
+    arguments = "install --no-audit --no-fund"
+    if windows:
+        return f'"{npm}" {arguments}', True
+    return [npm, *arguments.split()], False
 
 
 def _npm_environment(npm):

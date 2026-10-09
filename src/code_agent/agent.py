@@ -153,18 +153,6 @@ def _request_user_action(tool_call, on_user_action):
     )
 
 
-def _test_setup_action(test_output):
-    if "pytest skipped:" in test_output or "npm tests skipped:" in test_output:
-        return {
-            "title": "Install test prerequisites",
-            "instructions": (
-                f"{test_output}\n\nInstall the required runtime/dependencies, then "
-                "press OK to rerun the generated project tests. Press Cancel to stop."
-            ),
-        }
-    return None
-
-
 def run_agent(
     api_key,
     doc_path,
@@ -258,28 +246,16 @@ def run_agent(
             tests_passed, test_output = checker.run_generated_tests(workspace.root)
             if tests_passed is None:
                 safe_log(test_output)
-                action = _test_setup_action(test_output)
-                if action and not missing and not problems:
-                    if on_user_action is None:
-                        incomplete_reason = test_output
-                        safe_log("Generation is incomplete because tests could not run.")
-                        break
-                    safe_log("Waiting for user to install test prerequisites...")
-                    response = on_user_action(action)
-                    if cancel_event is not None and cancel_event.is_set():
-                        cancelled = True
-                        safe_log("Agent cancelled.")
-                        break
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                "The user completed the requested test setup task and "
-                                f"confirmed: {response}. Rerun all project tests now."
-                            ),
-                        }
+                if test_output.startswith(
+                    (
+                        "pytest skipped:",
+                        "npm tests skipped:",
+                        "npm dependency install failed",
                     )
-                    continue
+                ):
+                    incomplete_reason = test_output
+                    safe_log("Generation is incomplete because local tests could not run.")
+                    break
             elif tests_passed:
                 safe_log("Generated tests passed.")
             else:

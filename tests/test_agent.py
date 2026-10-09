@@ -29,8 +29,10 @@ def test_generation_prompt_requires_architecture_faithful_user_interfaces():
     assert "Do not replace a specified stack with Python" in SYSTEM_PROMPT
     assert "A backend, API docs, or" in SYSTEM_PROMPT
     assert "static mockup alone is not a complete UI" in SYSTEM_PROMPT
-    assert "continue from the code already there" in SYSTEM_PROMPT
-    assert "The files in the output workspace are the source of truth" in SYSTEM_PROMPT
+    assert "continue from" in SYSTEM_PROMPT
+    assert "preserve working implementation" in SYSTEM_PROMPT
+    assert "The files in the output workspace are the source of" in SYSTEM_PROMPT
+    assert "truth after an interrupted run" in SYSTEM_PROMPT
     assert "complete described play loop" in SYSTEM_PROMPT
     assert "request_user_action" in SYSTEM_PROMPT
     assert "resume only after the user confirms" in SYSTEM_PROMPT
@@ -390,16 +392,29 @@ def test_cancelling_during_user_action_does_not_send_another_model_request(tmp_p
     assert len(client.requests) == 1
 
 
-def test_skipped_test_runtime_pauses_then_retries_after_user_confirms(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("test_output", "expected_reason"),
+    [
+        (
+            "npm tests skipped: Node.js/npm is not installed",
+            "Node.js/npm is not installed",
+        ),
+        (
+            "npm dependency install failed for 'supertest' (exit code 1)",
+            "npm dependency install failed",
+        ),
+    ],
+)
+def test_test_prerequisite_failure_finishes_without_another_api_request(
+    tmp_path, monkeypatch, test_output, expected_reason
+):
     from src.code_agent import agent
 
-    test_results = iter(
-        [
-            (None, "npm tests skipped: Node.js/npm is not installed"),
-            (True, "tests passed"),
-        ]
+    monkeypatch.setattr(
+        agent.checker,
+        "run_generated_tests",
+        lambda _: (None, test_output),
     )
-    monkeypatch.setattr(agent.checker, "run_generated_tests", lambda _: next(test_results))
     responses = [
         FakeMessage(
             tool_calls=[
@@ -410,7 +425,6 @@ def test_skipped_test_runtime_pauses_then_retries_after_user_confirms(tmp_path, 
             ]
         ),
         FakeMessage(content="Complete."),
-        FakeMessage(content="Tests are passing now."),
     ]
     actions = []
     fake_client = FakeClient(responses)
@@ -421,13 +435,11 @@ def test_skipped_test_runtime_pauses_then_retries_after_user_confirms(tmp_path, 
         on_user_action=lambda action: actions.append(action) or "Installed Node.js.",
     )
 
-    assert result["finished"] is True
-    assert result["tests_passed"] is True
-    assert actions[0]["title"] == "Install test prerequisites"
-    assert any(
-        "Installed Node.js." in message.get("content", "")
-        for message in fake_client.requests[1]["messages"]
-    )
+    assert result["finished"] is False
+    assert result["tests_passed"] is None
+    assert expected_reason in result["incomplete_reason"]
+    assert actions == []
+    assert len(fake_client.requests) == 2
 
 
 def test_agent_repairs_syntax_problem_after_self_check(tmp_path, monkeypatch):

@@ -16,7 +16,7 @@ Code Agent is a simplified, desktop code-generation agent inspired by Claude Cod
 
 ## Architecture
 
-The preprocessor turns the documentation and PlantUML into structured JSON. The agent supplies that JSON to DeepSeek, which can only write, read, and list files inside the output workspace. The agent is instructed to follow the documented language and implement user-facing flows as working interfaces. The output is checked for a README, dependency manifest, tests, and—when the architecture describes a web app—an interactive HTML UI. Python syntax and likely undeclared imports are checked; Python projects run pytest and Node.js projects run their `npm test` script. Failed checks are sent back to the model repeatedly until they pass or the user cancels. If a test runtime or declared dependency is missing, generation pauses and asks the user to install it; pressing **OK - continue** reruns tests and resumes generation. The separate **Verify output** action remains local-only and never calls DeepSeek.
+The preprocessor turns the documentation and PlantUML into structured JSON. The agent supplies that JSON to DeepSeek, which can only write, read, and list files inside the output workspace. The agent is instructed to follow the documented language and implement user-facing flows as working interfaces. The output is checked for a README, dependency manifest, tests, and—when the architecture describes a web app—an interactive HTML UI. Python syntax and likely undeclared imports are checked; Python projects run pytest and Node.js projects run their `npm test` script. Failed checks are sent back to the model repeatedly until they pass or the user cancels. If a Node test reports a missing declared package, the app runs `npm install` in the generated project folder and retries the test. If the test runtime is missing or installation fails, generation ends as incomplete without waiting for a dialog or making another model request. The separate **Verify output** action remains local-only and never calls DeepSeek.
 
 ```mermaid
 flowchart LR
@@ -54,7 +54,7 @@ flowchart LR
 2. Enter a DeepSeek API key.
 3. The bundled `Architecture_Documentation.md` and `Architecture_View.md` samples are selected automatically; use **Browse...** to choose different files.
 4. Select an existing output folder.
-5. Click **Run**. The log tracks progress; **Cancel** requests a safe stop. The agent repeats repair requests until checks pass, so retries can use additional DeepSeek credits. If the agent needs an external/manual step, it shows the task and waits for **OK - continue** before making another model request. The optional response is sent to DeepSeek, so do not enter passwords, API keys, or other secrets there.
+5. Click **Run**. The log tracks progress; **Cancel** requests a safe stop. The agent repeats repair requests for project-code failures until checks pass, so retries can use additional DeepSeek credits. If a generated Node project is missing a declared package, the app installs dependencies in that output folder and reruns the tests. A missing runtime or failed dependency install ends the run as incomplete; it does not keep waiting for confirmation or make more model requests.
 6. To recheck an existing output after installing Node.js or Python, select its folder and click **Verify output (no API)**. This does not use DeepSeek credits or change generated files.
 
 The app asks before writing into a non-empty output folder. When generation ends, use **Open output folder** to inspect the generated project and `RUN_LOG.txt`.
@@ -112,6 +112,6 @@ Download the executable from a successful workflow run’s artifacts, or from th
 
 - A DeepSeek API key with sufficient account balance and internet connection are required for generation. HTTP 402 insufficient-balance errors are reported directly; add funds to the DeepSeek account before retrying.
 - DeepSeek responses can take time; the log displays the current request step and the 120-second request timeout while waiting.
-- Generation is not marked complete unless the generated test suite actually passes. When a runtime or declared dependency is missing, the agent pauses for the user to install it, then reruns the tests after confirmation. **Verify output** reports missing test prerequisites without using DeepSeek credits.
+- Generation is not marked complete unless the generated test suite actually passes. If a Node.js test reports a missing declared package, the app runs `npm install` in the generated project folder and retries the tests. If a test runtime is unavailable or installation fails, generation ends as incomplete instead of waiting on a dialog or making more DeepSeek requests. **Verify output** reports missing test prerequisites without installing packages or using DeepSeek credits.
 - Generated output quality depends on the model and the supplied architecture documents.
 - The packaged executable is Windows-only. It is unsigned, so Windows SmartScreen may show a warning.
