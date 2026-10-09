@@ -23,6 +23,12 @@ logic, and implement the described screens and user flow. A backend, API docs, o
 static mockup alone is not a complete UI. For a web app, include a working entry page,
 functional client-side interactions, any required backend, and clear local launch
 instructions in the README.
+The output workspace may already contain a partially or fully generated project from
+an earlier run. Always inspect its existing files before making changes, continue from
+the code already there, and preserve working implementation. Do not regenerate or
+replace the project from scratch just because this is a new run; add missing work and
+repair only what is necessary. The files in the output workspace are the source of
+truth after an interrupted run.
 For games, implement the complete described play loop, player input, feedback, score,
 and end/replay flow where those features are part of the requirements; do not deliver
 only game APIs or architecture scaffolding.

@@ -29,6 +29,8 @@ def test_generation_prompt_requires_architecture_faithful_user_interfaces():
     assert "Do not replace a specified stack with Python" in SYSTEM_PROMPT
     assert "A backend, API docs, or" in SYSTEM_PROMPT
     assert "static mockup alone is not a complete UI" in SYSTEM_PROMPT
+    assert "continue from the code already there" in SYSTEM_PROMPT
+    assert "The files in the output workspace are the source of truth" in SYSTEM_PROMPT
     assert "complete described play loop" in SYSTEM_PROMPT
     assert "request_user_action" in SYSTEM_PROMPT
     assert "resume only after the user confirms" in SYSTEM_PROMPT
